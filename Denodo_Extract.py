@@ -22,6 +22,7 @@ DATALOC:
 DATA:
   EAMS_RESULT_DATA: denodo_raw.json
   EAMS_CSV_OUTPUT: denodo_export.csv
+  EAMS_RUN_DATE: last_run.txt
   # EAMS_XLSX_OUTPUT: optional (defaults to same stem as CSV + .xlsx)
   URL: https://denodo.example.local/report123
 
@@ -39,7 +40,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -140,6 +141,31 @@ def choose_config_file() -> Path:
     return Path(filepath)
 
 
+def prompt_lookback_days() -> Optional[float]:
+    """
+    Prompt for lookback days via a simple Tkinter dialog. Returns None if cancelled/empty.
+    """
+    import tkinter as tk
+    from tkinter import messagebox, simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    value = simpledialog.askstring("Lookback window", "Enter lookback in days (e.g., 2 or 12). Leave blank to skip:")
+    if value is None:
+        return None  # cancelled
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        days = float(value)
+        if days < 0:
+            raise ValueError("Lookback must be non-negative")
+        return days
+    except Exception:
+        messagebox.showerror("Invalid input", "Please enter a non-negative number (e.g., 2 or 12).")
+        return None
+
+
 def load_config(path: Path) -> Dict[str, Any]:
     """
     Load YAML into a dictionary. Raise ConfigError on parse issues.
@@ -177,7 +203,7 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # DATA
     data = cfg["DATA"]
-    for key in ("EAMS_RESULT_DATA", "EAMS_CSV_OUTPUT", "URL"):
+    for key in ("EAMS_RESULT_DATA", "EAMS_CSV_OUTPUT", "EAMS_RUN_DATE", "URL"):
         if key not in data or not isinstance(data[key], str) or not data[key].strip():
             raise ConfigError(f"DATA.{key} is required and must be a non-empty string")
 
@@ -273,7 +299,72 @@ def ensure_output_dirs(root_dir: Path, out_dir: Path) -> None:
     """
     Ensure output directories exist.
     """
+    print(f"Ensuring output directory exists: {out_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+
+def parse_run_date(path: Path) -> Optional[datetime]:
+    """
+    Read prior run timestamp from EAMS_RUN_DATE. Returns None if missing or invalid.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        # Support trailing 'Z' and fractional seconds.
+        cleaned = text.replace("Z", "+00:00") if text.endswith("Z") else text
+        return datetime.fromisoformat(cleaned)
+    except Exception as exc:
+        logging.warning("Could not parse previous run date in %s: %s", path.as_posix(), exc)
+        return None
+
+
+def write_run_date(run_date_path: Path, when: datetime) -> None:
+    """
+    Record the execution time to the configured run date file.
+    """
+    run_date_path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = when.isoformat(timespec="seconds")
+    run_date_path.write_text(stamp + "\n", encoding="utf-8")
+    logging.info("Run date recorded: %s -> %s", run_date_path.as_posix(), stamp)
+
+
+def parse_last_modified(value: Any) -> Optional[datetime]:
+    """
+    Attempt to parse a lastmodifieddate field into a datetime.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        cleaned = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        return datetime.fromisoformat(cleaned)
+    except Exception:
+        return None
+
+
+def filter_modified_rows(rows: Iterable[Dict[str, Any]], since: datetime) -> List[Dict[str, Any]]:
+    """
+    Return rows whose lastmodifieddate is newer than 'since'.
+    """
+    newer = []
+    for row in rows:
+        modified = parse_last_modified(row.get("lastmodifieddate"))
+        if modified and modified > since:
+            newer.append(row)
+    return newer
+
+
+def marker_name(base_name: str, marker: str) -> str:
+    """
+    Insert a marker before the file extension (or at end if none).
+    """
+    p = Path(base_name)
+    return f"{p.stem}_{marker}{p.suffix or ''}"
 
 
 def timestamped_name(base_name: str, ts: str) -> str:
@@ -383,6 +474,8 @@ def main(argv=None) -> int:
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     parser.add_argument("--verify-ca", default="true",
                         help="TLS verification: 'true'/'false' or a path to a CA bundle file")
+    parser.add_argument("--lookback-days", type=float, default=None,
+                        help="Override: number of days back to collect modified rows (e.g., 2, 12).")
     args = parser.parse_args(argv)
 
     cfg_path = Path(args.config) if args.config else choose_config_file()
@@ -400,13 +493,20 @@ def main(argv=None) -> int:
     data_cfg = cfg["DATA"]
     json_base = data_cfg["EAMS_RESULT_DATA"]
     csv_base = data_cfg["EAMS_CSV_OUTPUT"]
+    run_date_cfg = data_cfg["EAMS_RUN_DATE"]
     xlsx_base = data_cfg.get("EAMS_XLSX_OUTPUT") or (Path(csv_base).with_suffix(".xlsx").name)
     url = data_cfg["URL"]
+
+    run_date_path = Path(run_date_cfg)
+    if not run_date_path.is_absolute():
+        # Keep run-date alongside other outputs
+        run_date_path = output_dir / run_date_path
 
     # Output dirs
     ensure_output_dirs(root_dir, output_dir)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_at = datetime.now()
+    ts = run_at.strftime("%Y%m%d_%H%M%S")
     json_name = timestamped_name(json_base, ts)
     csv_name = timestamped_name(csv_base, ts)
     xlsx_name = timestamped_name(xlsx_base, ts)
@@ -429,6 +529,19 @@ def main(argv=None) -> int:
 
     session = create_session()
     verify_ca = interpret_verify_ca(args.verify_ca)
+    previous_run_at = parse_run_date(run_date_path)
+    modified_anchor: Optional[datetime] = None
+
+    lookback_days: Optional[float] = args.lookback_days
+    if lookback_days is None:
+        lookback_days = prompt_lookback_days()
+
+    if lookback_days is not None:
+        modified_anchor = run_at - timedelta(days=lookback_days)
+        logging.info("Using lookback window: %s days (since %s)", lookback_days, modified_anchor.isoformat())
+    elif previous_run_at:
+        modified_anchor = previous_run_at
+        logging.info("Using previous run date for modified rows: %s", modified_anchor.isoformat())
 
     try:
         html = fetch_page(session, url, username, password, verify_ca)
@@ -436,6 +549,23 @@ def main(argv=None) -> int:
         write_json_snapshot(rows, json_path)
         write_csv(rows, csv_path)
         write_excel_table(rows, xlsx_path, table_name="DenodoData")
+        if modified_anchor:
+            modified_rows = filter_modified_rows(rows, modified_anchor)
+            if modified_rows:
+                modified_json_name = timestamped_name(marker_name(json_base, "modified"), ts)
+                modified_csv_name = timestamped_name(marker_name(csv_base, "modified"), ts)
+                modified_xlsx_name = timestamped_name(marker_name(xlsx_base, "modified"), ts)
+                write_json_snapshot(modified_rows, output_dir / modified_json_name)
+                write_csv(modified_rows, output_dir / modified_csv_name)
+                write_excel_table(modified_rows, output_dir / modified_xlsx_name, table_name="DenodoDataModified")
+                logging.info(
+                    "Modified rows since %s written (%d rows).",
+                    modified_anchor.isoformat(),
+                    len(modified_rows),
+                )
+            else:
+                logging.info("No rows with lastmodifieddate newer than %s", modified_anchor.isoformat())
+        write_run_date(run_date_path, run_at)
         logging.info("All done ✔")
         logging.info("Outputs:\n  JSON: %s\n  CSV:  %s\n  XLSX: %s", json_path, csv_path, xlsx_path)
         return 0
