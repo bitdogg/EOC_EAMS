@@ -2,37 +2,47 @@
 """
 Denodo Extract v2 (enhanced)
 ----------------------------
-Additions in this version:
+Pulls JSON data from a Denodo-backed HTML page, aggregates rows by `identifier`
+into one row with per-field distinct lists, and writes JSON/CSV/XLSX outputs.
+Lists are stringified for CSV/Excel using " | " as the separator.
+
+Key features:
 - Structured logging: console + rotating file handler (logs roll @ 1 MB, keep last 3 files)
 - Config validation: clear, actionable errors if required keys are missing/invalid
 - Excel output: writes .xlsx with an actual Excel Table (styled) in addition to CSV
 - TLS control: --verify-ca supports true/false or a CA bundle path
 - Output placement: --output-dir to pick a folder, or --use-config-dir to write next to the YAML
 - Dual CLI/GUI: run headless with CLI flags or interactively with --gui prompts
-- No-arg start: if launched without flags, you’ll see a brief instruction prompt and then GUI mode
+- No-arg start: if launched without flags, you'll see a brief instruction prompt and then GUI mode
 
-Usage:
-    python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --verify-ca true
-    # or provide a CA bundle path:
-    python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --verify-ca C:/corp/ca-bundle.pem
-    # choose where outputs land:
-    python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --output-dir D:/Exports
-    # GUI mode (pick config/output via dialogs):
-    python Denodo_Extract_v2_enhanced.py --gui
+How to run (CLI):
+    python Denodo_Extract.py --config /path/to/config.yml --verify-ca true
+    # with custom output folder:
+    python Denodo_Extract.py --config /path/to/config.yml --output-dir D:/Exports
+    # use CA bundle:
+    python Denodo_Extract.py --config /path/to/config.yml --verify-ca C:/corp/ca-bundle.pem
+
+How to run (GUI):
+    python Denodo_Extract.py --gui
+    # prompts for config, output directory, and optional lookback
 
 YAML expectations (minimal):
-DATALOC:
-  ROOT_DIR: C:\\Data\\Denodo
+STORAGE:
+  LOCAL_SYNC:
+    ROOT_DIR: C:\\Data\\Denodo
+PATHS:
   OUTPUT_DIR: exports
-  # LOG_DIR: optional, defaults to <ROOT_DIR>/<OUTPUT_DIR>/logs
-
-DATA:
+  SUBSET_DIR: output\\subsets
+  LOG_DIR: logs  # optional, defaults to <output_dir>/logs
+FILES:
   EAMS_RESULT_DATA: denodo_raw.json
   EAMS_CSV_OUTPUT: denodo_export.csv
   EAMS_RUN_DATE: last_run.txt
+  EAMS_CONTACT_INFO: contact_info.csv
+  EAMS_SERVER_INFO: server_info.csv
   # EAMS_XLSX_OUTPUT: optional (defaults to same stem as CSV + .xlsx)
+DATA_SOURCE:  # or legacy DATASOURCE
   URL: https://denodo.example.local/report123
-
 AUTHENTICATION:
   SERVICE_NAME: denodo-prod
   USERNAME: user
@@ -73,6 +83,7 @@ def normalize_cell_value(val) -> str:
     if val is None:
         s = ""
     elif isinstance(val, (list, tuple, set)):
+        # Lists are flattened for CSV/Excel using a pipe separator to avoid clashing with commas in values.
         s = " | ".join("" if v is None else str(v) for v in val)
     elif isinstance(val, dict):
         import json
@@ -231,30 +242,74 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     missing = []
     # Required sections
-    for sect in ("DATALOC", "DATA", "AUTHENTICATION"):
+    for sect in ("STORAGE", "PATHS", "FILES", "AUTHENTICATION", "SUBSETS"):
         if sect not in cfg or not isinstance(cfg[sect], dict):
             missing.append(sect)
+    if "DATA_SOURCE" not in cfg and "DATASOURCE" not in cfg:
+        missing.append("DATA_SOURCE")
 
     if missing:
         raise ConfigError(f"Missing or invalid sections in YAML: {', '.join(missing)}")
 
-    # DATALOC
-    dataloc = cfg["DATALOC"]
-    for key in ("ROOT_DIR", "OUTPUT_DIR"):
-        if key not in dataloc or not isinstance(dataloc[key], str) or not dataloc[key].strip():
-            raise ConfigError(f"DATALOC.{key} is required and must be a non-empty string")
+    # STORAGE
+    storage = cfg["STORAGE"]
+    if "LOCAL_SYNC" not in storage or not isinstance(storage["LOCAL_SYNC"], dict):
+        raise ConfigError("STORAGE.LOCAL_SYNC is required and must be a mapping")
+    local_sync = storage["LOCAL_SYNC"]
+    if "ROOT_DIR" not in local_sync or not isinstance(local_sync["ROOT_DIR"], str) or not local_sync["ROOT_DIR"].strip():
+        raise ConfigError("STORAGE.LOCAL_SYNC.ROOT_DIR is required and must be a non-empty string")
 
-    # DATA
-    data = cfg["DATA"]
-    for key in ("EAMS_RESULT_DATA", "EAMS_CSV_OUTPUT", "EAMS_RUN_DATE", "URL"):
-        if key not in data or not isinstance(data[key], str) or not data[key].strip():
-            raise ConfigError(f"DATA.{key} is required and must be a non-empty string")
+    # PATHS
+    paths = cfg["PATHS"]
+    for key in ("OUTPUT_DIR", "SUBSET_DIR"):
+        if key not in paths or not isinstance(paths[key], str) or not paths[key].strip():
+            raise ConfigError(f"PATHS.{key} is required and must be a non-empty string")
+    if "LOG_DIR" in paths and (not isinstance(paths["LOG_DIR"], str) or not paths["LOG_DIR"].strip()):
+        raise ConfigError("PATHS.LOG_DIR must be a non-empty string if provided")
+
+    # FILES
+    files = cfg["FILES"]
+    data_source = cfg.get("DATA_SOURCE") or cfg.get("DATASOURCE")
+    if not isinstance(data_source, dict):
+        raise ConfigError("DATA_SOURCE (or legacy DATASOURCE) must be a mapping")
+    # normalize for downstream use
+    cfg["DATA_SOURCE"] = data_source
+
+    for key in ("EAMS_RESULT_DATA", "EAMS_CSV_OUTPUT", "EAMS_RUN_DATE", "EAMS_SERVER_INFO", "EAMS_CONTACT_INFO"):
+        if key not in files or not isinstance(files[key], str) or not files[key].strip():
+            raise ConfigError(f"FILES.{key} is required and must be a non-empty string")
+
+    url_value = data_source.get("URL")
+    if not isinstance(url_value, str) or not url_value.strip():
+        legacy_url = files.get("URL")
+        if isinstance(legacy_url, str) and legacy_url.strip():
+            url_value = legacy_url
+            data_source["URL"] = legacy_url  # mirror for downstream use
+        else:
+            raise ConfigError("DATA_SOURCE.URL is required and must be a non-empty string (legacy configs may use FILES.URL)")
+
+    # Allow optional keys but ensure strings if present
+    for optional_key, value in files.items():
+        if not isinstance(value, str):
+            raise ConfigError(f"FILES.{optional_key} must be a string")
 
     # AUTHENTICATION
     auth = cfg["AUTHENTICATION"]
     for key in ("SERVICE_NAME", "USERNAME"):
         if key not in auth or not isinstance(auth[key], str) or not auth[key].strip():
             raise ConfigError(f"AUTHENTICATION.{key} is required and must be a non-empty string")
+
+    subsets = cfg["SUBSETS"]
+    if "CONTACT_INFO" not in subsets or not isinstance(subsets["CONTACT_INFO"], list) or not subsets["CONTACT_INFO"]:
+        raise ConfigError("SUBSETS.CONTACT_INFO is required and must be a non-empty list")
+    if "SERVICE_IPS" not in subsets or not isinstance(subsets["SERVICE_IPS"], list) or not subsets["SERVICE_IPS"]:
+        raise ConfigError("SUBSETS.SERVICE_IPS is required and must be a non-empty list")
+    for key, values in subsets.items():
+        if not isinstance(values, list):
+            raise ConfigError(f"SUBSETS.{key} must be a list of field names")
+        for v in values:
+            if not isinstance(v, str) or not v.strip():
+                raise ConfigError(f"SUBSETS.{key} entries must be non-empty strings")
 
     return cfg
 
@@ -402,6 +457,45 @@ def filter_modified_rows(rows: Iterable[Dict[str, Any]], since: datetime) -> Lis
     return newer
 
 
+def aggregate_by_identifier(rows: Iterable[Dict[str, Any]], key: str = "identifier") -> List[Dict[str, Any]]:
+    """
+    Group rows by identifier and collect distinct, non-empty values for each field as lists.
+    """
+    grouped: Dict[Any, Dict[str, Any]] = {}
+    for row in rows:
+        identifier_value = row.get(key)
+        bucket = grouped.setdefault(identifier_value, {key: identifier_value, "_seen": {}, "_data": {}})
+        seen = bucket["_seen"]
+        data = bucket["_data"]
+
+        for field, val in row.items():
+            if field == key:
+                continue
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+
+            field_seen = seen.setdefault(field, set())
+            try:
+                signature = json.dumps(val, sort_keys=True, default=str)
+            except Exception:
+                signature = repr(val)
+            if signature in field_seen:
+                continue
+
+            field_seen.add(signature)
+            data.setdefault(field, []).append(val)
+
+    aggregated_rows: List[Dict[str, Any]] = []
+    for bucket in grouped.values():
+        row_out = {key: bucket.get(key)}
+        for field, vals in bucket["_data"].items():
+            row_out[field] = vals
+        aggregated_rows.append(row_out)
+    return aggregated_rows
+
+
 def marker_name(base_name: str, marker: str) -> str:
     """
     Insert a marker before the file extension (or at end if none).
@@ -418,6 +512,14 @@ def timestamped_name(base_name: str, ts: str) -> str:
     stem = p.stem
     suffix = p.suffix or ""
     return f"{stem}_{ts}{suffix}"
+
+
+def ensure_named_file(base_name: str, default_suffix: str) -> str:
+    """
+    Ensure a filename has a suffix; if missing, append the provided default.
+    """
+    p = Path(base_name)
+    return p.name if p.suffix else f"{p.name}{default_suffix}"
 
 
 def union_fieldnames(rows):
@@ -457,6 +559,69 @@ def write_csv(rows, out_path: Path) -> None:
         for r in rows:
             writer.writerow(r)
     logging.info("CSV saved: %s", out_path.as_posix())
+
+
+def write_csv_with_headers(rows, headers, out_path: Path) -> None:
+    """
+    Write CSV limited to the provided headers (order preserved).
+    """
+    if not rows:
+        logging.warning("No rows to write to CSV.")
+        return
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            row_out = {h: r.get(h, "") for h in headers}
+            writer.writerow(row_out)
+    logging.info("CSV saved: %s", out_path.as_posix())
+
+
+def write_excel_table_with_headers(rows, headers, out_path: Path, table_name: str) -> None:
+    """
+    Write an .xlsx file limited to provided headers with an Excel Table.
+    """
+    if not rows:
+        logging.warning("No rows to write to Excel.")
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(headers)
+    for r in rows:
+        ws.append([normalize_cell_value(r.get(h, "")) for h in headers])
+
+    def col_letter(n: int) -> str:
+        letters = ""
+        while n:
+            n, rem = divmod(n - 1, 26)
+            letters = chr(65 + rem) + letters
+        return letters
+
+    last_row = ws.max_row
+    last_col = ws.max_column
+    safe_name = re.sub(r"\W+", "", table_name)[:254] or "T1"
+    ref = f"A1:{col_letter(last_col)}{last_row}"
+    table = Table(displayName=safe_name, ref=ref)
+    style = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True, showColumnStripes=False)
+    table.tableStyleInfo = style
+    ws.add_table(table)
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
+        col_letter_name = col[0].column_letter
+        ws.column_dimensions[col_letter_name].width = min(max(12, max_len + 2), 60)
+
+    wb.save(out_path)
+    logging.info("Excel saved with table: %s", out_path.as_posix())
+
+
+def subset_rows(rows, headers):
+    """
+    Extract a list of dicts limited to provided headers.
+    """
+    return [{h: r.get(h, "") for h in headers} for r in rows]
 
 
 def write_excel_table(rows, out_path: Path, table_name: str = "DenodoData") -> None:
@@ -543,9 +708,12 @@ def main(argv=None) -> int:
     cfg = validate_config(load_config(cfg_path))
 
     # Resolve directories
-    dataloc_cfg = cfg["DATALOC"]
-    root_dir = Path(dataloc_cfg["ROOT_DIR"])
-    default_output_dir = root_dir / dataloc_cfg["OUTPUT_DIR"]
+    storage_cfg = cfg["STORAGE"]["LOCAL_SYNC"]
+    root_dir = Path(storage_cfg["ROOT_DIR"])
+    paths_cfg = cfg["PATHS"]
+    default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
+    if not default_output_dir.is_absolute():
+        default_output_dir = root_dir / default_output_dir
 
     if args.use_config_dir:
         output_dir = cfg_path.parent
@@ -566,7 +734,7 @@ def main(argv=None) -> int:
     if not output_dir.is_absolute():
         output_dir = output_dir.resolve()
 
-    log_dir_cfg = dataloc_cfg.get("LOG_DIR")
+    log_dir_cfg = paths_cfg.get("LOG_DIR")
     if log_dir_cfg:
         log_dir = Path(log_dir_cfg)
         if not log_dir.is_absolute():
@@ -574,16 +742,22 @@ def main(argv=None) -> int:
     else:
         log_dir = output_dir / "logs"
 
+    subset_dir_cfg = paths_cfg["SUBSET_DIR"]
+    subset_dir = Path(subset_dir_cfg)
+    if not subset_dir.is_absolute():
+        subset_dir = output_dir / subset_dir
+
     # Initialize logging
     setup_logging(log_dir, level=args.log_level)
 
     # Filenames
-    data_cfg = cfg["DATA"]
-    json_base = data_cfg["EAMS_RESULT_DATA"]
-    csv_base = data_cfg["EAMS_CSV_OUTPUT"]
-    run_date_cfg = data_cfg["EAMS_RUN_DATE"]
-    xlsx_base = data_cfg.get("EAMS_XLSX_OUTPUT") or (Path(csv_base).with_suffix(".xlsx").name)
-    url = data_cfg["URL"]
+    files_cfg = cfg["FILES"]
+    json_base = files_cfg["EAMS_RESULT_DATA"]
+    csv_base = files_cfg["EAMS_CSV_OUTPUT"]
+    run_date_cfg = files_cfg["EAMS_RUN_DATE"]
+    xlsx_base = files_cfg.get("EAMS_XLSX_OUTPUT") or (Path(csv_base).with_suffix(".xlsx").name)
+    data_source_cfg = cfg.get("DATA_SOURCE") or cfg.get("DATASOURCE") or {}
+    url = data_source_cfg.get("URL") or files_cfg.get("URL")
 
     run_date_path = Path(run_date_cfg)
     if not run_date_path.is_absolute():
@@ -592,16 +766,29 @@ def main(argv=None) -> int:
 
     # Output dirs
     ensure_output_dirs(output_dir)
+    ensure_output_dirs(subset_dir)
 
     run_at = datetime.now()
     ts = run_at.strftime("%Y%m%d_%H%M%S")
     json_name = timestamped_name(json_base, ts)
     csv_name = timestamped_name(csv_base, ts)
     xlsx_name = timestamped_name(xlsx_base, ts)
+    contact_base = ensure_named_file(files_cfg["EAMS_CONTACT_INFO"], ".csv")
+    server_base = ensure_named_file(files_cfg["EAMS_SERVER_INFO"], ".csv")
 
     json_path = output_dir / json_name
     csv_path = output_dir / csv_name
     xlsx_path = output_dir / xlsx_name
+    contact_csv_path = subset_dir / timestamped_name(contact_base, ts)
+    server_csv_path = subset_dir / timestamped_name(server_base, ts)
+    contact_json_path = subset_dir / timestamped_name(Path(contact_base).with_suffix(".json").name, ts)
+    contact_xlsx_path = subset_dir / timestamped_name(Path(contact_base).with_suffix(".xlsx").name, ts)
+    server_json_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".json").name, ts)
+    server_xlsx_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".xlsx").name, ts)
+
+    subsets_cfg = cfg["SUBSETS"]
+    contact_fields = subsets_cfg["CONTACT_INFO"]
+    service_fields = subsets_cfg["SERVICE_IPS"]
 
     auth = cfg["AUTHENTICATION"]
     service = auth["SERVICE_NAME"]
@@ -634,28 +821,62 @@ def main(argv=None) -> int:
     try:
         html = fetch_page(session, url, username, password, verify_ca)
         rows = extract_json_data(html)
-        write_json_snapshot(rows, json_path)
-        write_csv(rows, csv_path)
-        write_excel_table(rows, xlsx_path, table_name="DenodoData")
+        aggregated_rows = aggregate_by_identifier(rows, key="identifier")
+        logging.info("Aggregated %d source rows into %d identifier rows", len(rows), len(aggregated_rows))
+
+        contact_subset_rows = subset_rows(aggregated_rows, contact_fields)
+        service_subset_rows = subset_rows(aggregated_rows, service_fields)
+
+        write_json_snapshot(aggregated_rows, json_path)
+        write_csv(aggregated_rows, csv_path)
+        write_excel_table(aggregated_rows, xlsx_path, table_name="DenodoData")
+        write_json_snapshot(contact_subset_rows, contact_json_path)
+        write_csv_with_headers(aggregated_rows, contact_fields, contact_csv_path)
+        write_excel_table_with_headers(contact_subset_rows, contact_fields, contact_xlsx_path, table_name="ContactInfo")
+        write_json_snapshot(service_subset_rows, server_json_path)
+        write_csv_with_headers(aggregated_rows, service_fields, server_csv_path)
+        write_excel_table_with_headers(service_subset_rows, service_fields, server_xlsx_path, table_name="ServiceIps")
         if modified_anchor:
             modified_rows = filter_modified_rows(rows, modified_anchor)
             if modified_rows:
+                aggregated_modified_rows = aggregate_by_identifier(modified_rows, key="identifier")
                 modified_json_name = timestamped_name(marker_name(json_base, "modified"), ts)
                 modified_csv_name = timestamped_name(marker_name(csv_base, "modified"), ts)
                 modified_xlsx_name = timestamped_name(marker_name(xlsx_base, "modified"), ts)
-                write_json_snapshot(modified_rows, output_dir / modified_json_name)
-                write_csv(modified_rows, output_dir / modified_csv_name)
-                write_excel_table(modified_rows, output_dir / modified_xlsx_name, table_name="DenodoDataModified")
+                write_json_snapshot(aggregated_modified_rows, output_dir / modified_json_name)
+                write_csv(aggregated_modified_rows, output_dir / modified_csv_name)
+                write_excel_table(aggregated_modified_rows, output_dir / modified_xlsx_name, table_name="DenodoDataModified")
                 logging.info(
-                    "Modified rows since %s written (%d rows).",
+                    "Modified rows since %s written (%d rows source -> %d identifiers).",
                     modified_anchor.isoformat(),
                     len(modified_rows),
+                    len(aggregated_modified_rows),
                 )
             else:
                 logging.info("No rows with lastmodifieddate newer than %s", modified_anchor.isoformat())
         write_run_date(run_date_path, run_at)
         logging.info("All done ✔")
-        logging.info("Outputs:\n  JSON: %s\n  CSV:  %s\n  XLSX: %s", json_path, csv_path, xlsx_path)
+        logging.info(
+            "Outputs:\n"
+            "  JSON: %s\n"
+            "  CSV:  %s\n"
+            "  XLSX: %s\n"
+            "  Contact subset JSON: %s\n"
+            "  Contact subset CSV:  %s\n"
+            "  Contact subset XLSX: %s\n"
+            "  Server subset JSON: %s\n"
+            "  Server subset CSV:  %s\n"
+            "  Server subset XLSX: %s",
+            json_path,
+            csv_path,
+            xlsx_path,
+            contact_json_path,
+            contact_csv_path,
+            contact_xlsx_path,
+            server_json_path,
+            server_csv_path,
+            server_xlsx_path,
+        )
         if args.gui:
             try:
                 import tkinter as tk
@@ -664,7 +885,17 @@ def main(argv=None) -> int:
                 root.withdraw()
                 messagebox.showinfo(
                     "Denodo Extract",
-                    f"Completed successfully.\n\nOutputs:\nJSON: {json_path}\nCSV: {csv_path}\nXLSX: {xlsx_path}",
+                    "Completed successfully.\n\n"
+                    f"Outputs:\n"
+                    f"JSON: {json_path}\n"
+                    f"CSV: {csv_path}\n"
+                    f"XLSX: {xlsx_path}\n"
+                    f"Contact subset JSON: {contact_json_path}\n"
+                    f"Contact subset CSV: {contact_csv_path}\n"
+                    f"Contact subset XLSX: {contact_xlsx_path}\n"
+                    f"Server subset JSON: {server_json_path}\n"
+                    f"Server subset CSV: {server_csv_path}\n"
+                    f"Server subset XLSX: {server_xlsx_path}",
                 )
             except Exception:
                 # GUI messaging is best-effort
