@@ -7,11 +7,18 @@ Additions in this version:
 - Config validation: clear, actionable errors if required keys are missing/invalid
 - Excel output: writes .xlsx with an actual Excel Table (styled) in addition to CSV
 - TLS control: --verify-ca supports true/false or a CA bundle path
+- Output placement: --output-dir to pick a folder, or --use-config-dir to write next to the YAML
+- Dual CLI/GUI: run headless with CLI flags or interactively with --gui prompts
+- No-arg start: if launched without flags, you’ll see a brief instruction prompt and then GUI mode
 
 Usage:
     python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --verify-ca true
     # or provide a CA bundle path:
     python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --verify-ca C:/corp/ca-bundle.pem
+    # choose where outputs land:
+    python Denodo_Extract_v2_enhanced.py --config /path/to/config.yml --output-dir D:/Exports
+    # GUI mode (pick config/output via dialogs):
+    python Denodo_Extract_v2_enhanced.py --gui
 
 YAML expectations (minimal):
 DATALOC:
@@ -139,6 +146,42 @@ def choose_config_file() -> Path:
         messagebox.showerror("No file selected", "No configuration file was selected. Exiting.")
         sys.exit(1)
     return Path(filepath)
+
+
+def choose_output_dir(default: Optional[Path] = None) -> Optional[Path]:
+    """
+    Prompt the user to select an output directory. Returns None if cancelled.
+    """
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    initial = default.as_posix() if default else None
+    path = filedialog.askdirectory(title="Select output directory", initialdir=initial)
+    return Path(path) if path else None
+
+
+def show_start_instructions() -> None:
+    """
+    Present a brief how-to when starting without CLI flags.
+    """
+    message = (
+        "Denodo Extract can run either way:\n\n"
+        "  CLI (headless):\n"
+        "    python Denodo_Extract.py --config <path/to/config.yml>\n"
+        "      [--output-dir <path>] [--verify-ca true|false|/path]\n\n"
+        "  GUI (default when no flags): prompts for config/output and optional lookback.\n\n"
+        "Continuing with GUI..."
+    )
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Denodo Extract", message)
+    except Exception:
+        print(message)
 
 
 def prompt_lookback_days() -> Optional[float]:
@@ -295,7 +338,7 @@ def extract_json_data(html: str):
         raise ValueError(f"Failed to parse embedded JSON: {exc}")
 
 
-def ensure_output_dirs(root_dir: Path, out_dir: Path) -> None:
+def ensure_output_dirs(out_dir: Path) -> None:
     """
     Ensure output directories exist.
     """
@@ -469,6 +512,11 @@ def write_excel_table(rows, out_path: Path, table_name: str = "DenodoData") -> N
 # ---------------------------
 
 def main(argv=None) -> int:
+    raw_args = list(argv) if argv is not None else sys.argv[1:]
+    if not raw_args:
+        show_start_instructions()
+        raw_args = ["--gui"]
+
     parser = argparse.ArgumentParser(description="Denodo Extract (enhanced)")
     parser.add_argument("--config", help="Path to YAML config file")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
@@ -476,15 +524,55 @@ def main(argv=None) -> int:
                         help="TLS verification: 'true'/'false' or a path to a CA bundle file")
     parser.add_argument("--lookback-days", type=float, default=None,
                         help="Override: number of days back to collect modified rows (e.g., 2, 12).")
-    args = parser.parse_args(argv)
+    parser.add_argument("--gui", action="store_true",
+                        help="Run with GUI prompts (file pickers/message boxes).")
+    out_group = parser.add_mutually_exclusive_group()
+    out_group.add_argument("--output-dir", help="Override output directory (absolute or relative).")
+    out_group.add_argument("--use-config-dir", action="store_true",
+                           help="Write outputs next to the YAML config file.")
+    args = parser.parse_args(raw_args)
 
-    cfg_path = Path(args.config) if args.config else choose_config_file()
+    if args.gui:
+        cfg_path = Path(args.config) if args.config else choose_config_file()
+    else:
+        if not args.config:
+            print("Error: --config is required in CLI mode (omit to use --gui).", file=sys.stderr)
+            return 2
+        cfg_path = Path(args.config)
+    cfg_path = cfg_path.resolve()
     cfg = validate_config(load_config(cfg_path))
 
     # Resolve directories
-    root_dir = Path(cfg["DATALOC"]["ROOT_DIR"])
-    output_dir = root_dir / cfg["DATALOC"]["OUTPUT_DIR"]
-    log_dir = Path(cfg["DATALOC"].get("LOG_DIR") or (output_dir / "logs"))
+    dataloc_cfg = cfg["DATALOC"]
+    root_dir = Path(dataloc_cfg["ROOT_DIR"])
+    default_output_dir = root_dir / dataloc_cfg["OUTPUT_DIR"]
+
+    if args.use_config_dir:
+        output_dir = cfg_path.parent
+    elif args.output_dir:
+        output_dir = Path(args.output_dir)
+        if not output_dir.is_absolute():
+            output_dir = output_dir.resolve()
+    elif args.gui:
+        picked = choose_output_dir(default_output_dir)
+        if picked:
+            output_dir = picked
+        else:
+            print("No output directory selected. Exiting.")
+            return 1
+    else:
+        output_dir = default_output_dir
+
+    if not output_dir.is_absolute():
+        output_dir = output_dir.resolve()
+
+    log_dir_cfg = dataloc_cfg.get("LOG_DIR")
+    if log_dir_cfg:
+        log_dir = Path(log_dir_cfg)
+        if not log_dir.is_absolute():
+            log_dir = output_dir / log_dir
+    else:
+        log_dir = output_dir / "logs"
 
     # Initialize logging
     setup_logging(log_dir, level=args.log_level)
@@ -503,7 +591,7 @@ def main(argv=None) -> int:
         run_date_path = output_dir / run_date_path
 
     # Output dirs
-    ensure_output_dirs(root_dir, output_dir)
+    ensure_output_dirs(output_dir)
 
     run_at = datetime.now()
     ts = run_at.strftime("%Y%m%d_%H%M%S")
@@ -533,7 +621,7 @@ def main(argv=None) -> int:
     modified_anchor: Optional[datetime] = None
 
     lookback_days: Optional[float] = args.lookback_days
-    if lookback_days is None:
+    if lookback_days is None and args.gui:
         lookback_days = prompt_lookback_days()
 
     if lookback_days is not None:
@@ -568,9 +656,31 @@ def main(argv=None) -> int:
         write_run_date(run_date_path, run_at)
         logging.info("All done ✔")
         logging.info("Outputs:\n  JSON: %s\n  CSV:  %s\n  XLSX: %s", json_path, csv_path, xlsx_path)
+        if args.gui:
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showinfo(
+                    "Denodo Extract",
+                    f"Completed successfully.\n\nOutputs:\nJSON: {json_path}\nCSV: {csv_path}\nXLSX: {xlsx_path}",
+                )
+            except Exception:
+                # GUI messaging is best-effort
+                pass
         return 0
     except Exception as exc:
         logging.exception("Fatal error: %s", exc)
+        if args.gui:
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showerror("Denodo Extract - Error", str(exc))
+            except Exception:
+                pass
         return 1
 
 
