@@ -79,7 +79,7 @@ from openpyxl import Workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
-def normalize_cell_value(val) -> str:
+def normalize_cell_value(val: Any) -> str:
     if val is None:
         s = ""
     elif isinstance(val, (list, tuple, set)):
@@ -103,8 +103,15 @@ def normalize_cell_value(val) -> str:
 
 def setup_logging(log_dir: Path, level: str = "INFO") -> None:
     """
-    Configure root logger with both console and rotating file handler.
-    Creates the log directory if missing.
+    Configure application logging.
+
+    Creates the log directory if needed and configures the root logger with:
+    - a console handler, and
+    - a rotating file handler (denodo_extract.log).
+
+    Args:
+        log_dir: Directory where log files will be written.
+        level: Log level name (e.g., "INFO", "DEBUG"). Defaults to "INFO".
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "denodo_extract.log"
@@ -142,7 +149,13 @@ class ConfigError(Exception):
 
 def choose_config_file() -> Path:
     """
-    Prompt the user to select a YAML config if --config is not provided.
+    Show a GUI file picker to select a YAML configuration file.
+
+    Returns:
+        Path to the selected YAML file.
+
+    Raises:
+        SystemExit: If the user cancels the dialog.
     """
     import tkinter as tk
     from tkinter import filedialog, messagebox
@@ -161,7 +174,13 @@ def choose_config_file() -> Path:
 
 def choose_output_dir(default: Optional[Path] = None) -> Optional[Path]:
     """
-    Prompt the user to select an output directory. Returns None if cancelled.
+    Show a GUI folder picker to select an output directory.
+
+    Args:
+        default: Optional default directory to preselect.
+
+    Returns:
+        Path to the selected directory, or None if the user cancels.
     """
     import tkinter as tk
     from tkinter import filedialog
@@ -175,7 +194,10 @@ def choose_output_dir(default: Optional[Path] = None) -> Optional[Path]:
 
 def show_start_instructions() -> None:
     """
-    Present a brief how-to when starting without CLI flags.
+    Display basic start/run instructions for interactive (GUI) usage.
+
+    Returns:
+        None
     """
     message = (
         "Denodo Extract can run either way:\n\n"
@@ -197,7 +219,10 @@ def show_start_instructions() -> None:
 
 def prompt_lookback_days() -> Optional[float]:
     """
-    Prompt for lookback days via a simple Tkinter dialog. Returns None if cancelled/empty.
+    Prompt the user (GUI) for a lookback window in days.
+
+    Returns:
+        Number of days as a float, or None if the user cancels or leaves it blank.
     """
     import tkinter as tk
     from tkinter import messagebox, simpledialog
@@ -222,7 +247,17 @@ def prompt_lookback_days() -> Optional[float]:
 
 def load_config(path: Path) -> Dict[str, Any]:
     """
-    Load YAML into a dictionary. Raise ConfigError on parse issues.
+    Load a YAML configuration file.
+
+    Args:
+        path: Path to a YAML configuration file.
+
+    Returns:
+        Parsed configuration as a dictionary.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        yaml.YAMLError: If the YAML cannot be parsed.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -236,9 +271,19 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Validate presence and basic types of required keys.
-    Returns the (possibly updated) config dict.
-    Raises ConfigError with actionable messages on failure.
+    Validate and normalize configuration.
+
+    Validates that required sections/keys exist and normalizes legacy aliases
+    (e.g., DATASOURCE -> DATA_SOURCE). Intended to fail fast with actionable errors.
+
+    Args:
+        cfg: Raw configuration dictionary loaded from YAML.
+
+    Returns:
+        Validated configuration dictionary (may include normalized keys).
+
+    Raises:
+        ValueError: If required sections/keys are missing or invalid.
     """
     missing = []
     # Required sections
@@ -320,7 +365,10 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_session() -> requests.Session:
     """
-    Create a requests session with retry/backoff for transient errors.
+    Create a requests session with retry/backoff.
+
+    Returns:
+        A configured requests.Session that retries transient HTTP failures.
     """
     session = requests.Session()
     retries = Retry(
@@ -338,10 +386,16 @@ def create_session() -> requests.Session:
 
 def interpret_verify_ca(value: str | None) -> str | bool:
     """
-    Interpret --verify-ca option:
-    - None or 'true' (default)  -> True
-    - 'false'                   -> False
-    - otherwise                 -> treat as a file path and return the string as-is
+    Interpret the TLS verification option from CLI.
+
+    Args:
+        value: One of:
+            - "true"/"false" (case-insensitive) to enable/disable TLS verification
+            - a filesystem path to a CA bundle
+            - None to use default verification (enabled)
+
+    Returns:
+        True/False, or a string path to a CA bundle file.
     """
     if value is None:
         return True
@@ -353,10 +407,22 @@ def interpret_verify_ca(value: str | None) -> str | bool:
     return value  # presumed path to CA bundle
 
 
-def fetch_page(session: requests.Session, url: str, username: str, password: str, verify_ca) -> str:
+def fetch_page(session: requests.Session, url: str, username: str, password: str, verify_ca: str | bool) -> str:
     """
-    GET the target URL using Basic Auth and return the HTML text.
-    Raises requests exceptions on error.
+    Fetch the Denodo-backed HTML page using HTTP Basic Authentication.
+
+    Args:
+        session: Requests session to use.
+        url: Target URL to fetch.
+        username: HTTP Basic Auth username.
+        password: HTTP Basic Auth password.
+        verify_ca: TLS verification setting (True/False or CA bundle path).
+
+    Returns:
+        Response body as HTML text.
+
+    Raises:
+        requests.RequestException: On network/HTTP failures.
     """
     import urllib3
     if verify_ca is False:
@@ -377,9 +443,21 @@ def fetch_page(session: requests.Session, url: str, username: str, password: str
 # Parsing & Output
 # ---------------------------
 
-def extract_json_data(html: str):
+def extract_json_data(html: str) -> List[Dict[str, Any]]:
     """
-    Locate 'var data = [ {...}, ... ]' in the HTML and parse it into a list of dicts.
+    Extract embedded JSON rows from the HTML page.
+
+    The source page is expected to contain a JavaScript assignment like:
+        var data = [ ... ];
+
+    Args:
+        html: Full HTML response body.
+
+    Returns:
+        Parsed list of row dictionaries.
+
+    Raises:
+        ValueError: If the embedded JSON payload cannot be found or parsed.
     """
     match = re.search(r"var\s+data\s*=\s*(\[\s*{.*?}\s*\])", html, re.DOTALL)
     if not match:
@@ -395,7 +473,13 @@ def extract_json_data(html: str):
 
 def ensure_output_dirs(out_dir: Path) -> None:
     """
-    Ensure output directories exist.
+    Ensure the output directory exists.
+
+    Args:
+        out_dir: Output directory path.
+
+    Returns:
+        None
     """
     print(f"Ensuring output directory exists: {out_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -403,7 +487,13 @@ def ensure_output_dirs(out_dir: Path) -> None:
 
 def parse_run_date(path: Path) -> Optional[datetime]:
     """
-    Read prior run timestamp from EAMS_RUN_DATE. Returns None if missing or invalid.
+    Parse a stored run timestamp from a text file.
+
+    Args:
+        path: Path to the run date file.
+
+    Returns:
+        Parsed datetime if present and valid; otherwise None.
     """
     if not path.exists():
         return None
@@ -421,7 +511,14 @@ def parse_run_date(path: Path) -> Optional[datetime]:
 
 def write_run_date(run_date_path: Path, when: datetime) -> None:
     """
-    Record the execution time to the configured run date file.
+    Write a run timestamp to the run date file.
+
+    Args:
+        run_date_path: Path to the run date file.
+        when: Timestamp to record.
+
+    Returns:
+        None
     """
     run_date_path.parent.mkdir(parents=True, exist_ok=True)
     stamp = when.isoformat(timespec="seconds")
@@ -431,7 +528,13 @@ def write_run_date(run_date_path: Path, when: datetime) -> None:
 
 def parse_last_modified(value: Any) -> Optional[datetime]:
     """
-    Attempt to parse a lastmodifieddate field into a datetime.
+    Parse a last-modified timestamp value from the dataset.
+
+    Args:
+        value: Input value which may be a string, datetime, or None.
+
+    Returns:
+        A datetime if parseable; otherwise None.
     """
     if value is None:
         return None
@@ -459,7 +562,17 @@ def filter_modified_rows(rows: Iterable[Dict[str, Any]], since: datetime) -> Lis
 
 def aggregate_by_identifier(rows: Iterable[Dict[str, Any]], key: str = "identifier") -> List[Dict[str, Any]]:
     """
-    Group rows by identifier and collect distinct, non-empty values for each field as lists.
+    Aggregate source rows by identifier.
+
+    For each identifier, collects distinct values per field into lists. Empty/None
+    values are ignored. Produces one normalized record per identifier.
+
+    Args:
+        rows: Iterable of source row dictionaries.
+        key: Field name to group by. Defaults to "identifier".
+
+    Returns:
+        List of aggregated row dictionaries.
     """
     grouped: Dict[Any, Dict[str, Any]] = {}
     for row in rows:
@@ -498,7 +611,14 @@ def aggregate_by_identifier(rows: Iterable[Dict[str, Any]], key: str = "identifi
 
 def marker_name(base_name: str, marker: str) -> str:
     """
-    Insert a marker before the file extension (or at end if none).
+    Create a derived filename by inserting a marker before the extension.
+
+    Args:
+        base_name: Base filename (e.g., "denodo_export.csv").
+        marker: Marker string (e.g., "changes", "modified").
+
+    Returns:
+        New filename including the marker.
     """
     p = Path(base_name)
     return f"{p.stem}_{marker}{p.suffix or ''}"
@@ -506,25 +626,43 @@ def marker_name(base_name: str, marker: str) -> str:
 
 def timestamped_name(base_name: str, ts: str) -> str:
     """
-    Insert _YYYYMMDD_HHMMSS before file extension.
+    Create a timestamped filename.
+
+    Args:
+        base_name: Base filename.
+        ts: Timestamp string (already formatted).
+
+    Returns:
+        Timestamped filename.
     """
     p = Path(base_name)
-    stem = p.stem
-    suffix = p.suffix or ""
-    return f"{stem}_{ts}{suffix}"
+    return f"{ts}_{p.name}"
 
 
 def ensure_named_file(base_name: str, default_suffix: str) -> str:
     """
-    Ensure a filename has a suffix; if missing, append the provided default.
+    Ensure a filename has an extension.
+
+    Args:
+        base_name: Input filename (may be missing extension).
+        default_suffix: Extension to apply if missing (e.g., ".json").
+
+    Returns:
+        Filename with an extension.
     """
     p = Path(base_name)
     return p.name if p.suffix else f"{p.name}{default_suffix}"
 
 
-def union_fieldnames(rows):
+def union_fieldnames(rows: Iterable[Dict[str, Any]]) -> List[str]:
     """
-    Return a stable, first-seen-order list of unioned keys across all dict rows.
+    Compute the union of all keys across rows.
+
+    Args:
+        rows: Iterable of row dictionaries.
+
+    Returns:
+        Sorted list of unique field names.
     """
     fields = set()
     order = []
@@ -536,18 +674,32 @@ def union_fieldnames(rows):
     return order
 
 
-def write_json_snapshot(rows, out_path: Path) -> None:
+def write_json_snapshot(rows: List[Dict[str, Any]], out_path: Path) -> None:
     """
-    Pretty-print JSON for human inspection.
+    Write a JSON snapshot to disk.
+
+    Args:
+        rows: Row dictionaries to write.
+        out_path: Destination path.
+
+    Returns:
+        None
     """
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
     logging.info("JSON snapshot saved: %s", out_path.as_posix())
 
 
-def write_csv(rows, out_path: Path) -> None:
+def write_csv(rows: List[Dict[str, Any]], out_path: Path) -> None:
     """
-    Write CSV with unioned headers across all rows.
+    Write a CSV file with headers derived from the union of row keys.
+
+    Args:
+        rows: Row dictionaries to write.
+        out_path: Destination path.
+
+    Returns:
+        None
     """
     if not rows:
         logging.warning("No rows to write to CSV.")
@@ -561,9 +713,17 @@ def write_csv(rows, out_path: Path) -> None:
     logging.info("CSV saved: %s", out_path.as_posix())
 
 
-def write_csv_with_headers(rows, headers, out_path: Path) -> None:
+def write_csv_with_headers(rows: List[Dict[str, Any]], headers: List[str], out_path: Path) -> None:
     """
-    Write CSV limited to the provided headers (order preserved).
+    Write a CSV file using an explicit header order.
+
+    Args:
+        rows: Row dictionaries to write.
+        headers: Header field order to use.
+        out_path: Destination path.
+
+    Returns:
+        None
     """
     if not rows:
         logging.warning("No rows to write to CSV.")
@@ -577,9 +737,18 @@ def write_csv_with_headers(rows, headers, out_path: Path) -> None:
     logging.info("CSV saved: %s", out_path.as_posix())
 
 
-def write_excel_table_with_headers(rows, headers, out_path: Path, table_name: str) -> None:
+def write_excel_table_with_headers(rows: List[Dict[str, Any]], headers: List[str], out_path: Path, table_name: str) -> None:
     """
-    Write an .xlsx file limited to provided headers with an Excel Table.
+    Write an XLSX file containing a styled Excel Table using explicit headers.
+
+    Args:
+        rows: Row dictionaries to write.
+        headers: Header field order to use.
+        out_path: Destination path.
+        table_name: Excel table name.
+
+    Returns:
+        None
     """
     if not rows:
         logging.warning("No rows to write to Excel.")
@@ -617,16 +786,31 @@ def write_excel_table_with_headers(rows, headers, out_path: Path, table_name: st
     logging.info("Excel saved with table: %s", out_path.as_posix())
 
 
-def subset_rows(rows, headers):
+def subset_rows(rows: List[Dict[str, Any]], headers: List[str]) -> List[Dict[str, Any]]:
     """
-    Extract a list of dicts limited to provided headers.
+    Project rows onto a subset of headers.
+
+    Args:
+        rows: Source rows.
+        headers: Headers to keep.
+
+    Returns:
+        Subset rows with only the requested headers.
     """
     return [{h: r.get(h, "") for h in headers} for r in rows]
 
 
 def write_excel_table(rows, out_path: Path, table_name: str = "DenodoData") -> None:
     """
-    Write an .xlsx file with a styled Excel Table containing the rows.
+    Write an XLSX file containing a styled Excel Table.
+
+    Args:
+        rows: Row dictionaries to write.
+        out_path: Destination path.
+        table_name: Excel table name. Defaults to "DenodoData".
+
+    Returns:
+        None
     """
     if not rows:
         logging.warning("No rows to write to Excel.")
@@ -672,11 +856,97 @@ def write_excel_table(rows, out_path: Path, table_name: str = "DenodoData") -> N
     logging.info("Excel saved with table: %s", out_path.as_posix())
 
 
+def find_latest_snapshot(output_dir: Path, base_name: str) -> Optional[Path]:
+    """
+    Find the most recent JSON snapshot matching the configured base name.
+
+    Args:
+        output_dir: Directory to search.
+        base_name: Base JSON filename (without timestamp).
+
+    Returns:
+        Path to the latest matching snapshot, or None if not found.
+    """
+    pattern = f"*_{Path(base_name).name}"
+    candidates = sorted(p for p in output_dir.glob(pattern) if p.is_file())
+    return candidates[-1] if candidates else None
+
+
+def load_json_rows(path: Path) -> List[Dict[str, Any]]:
+    """
+    Load rows from a JSON snapshot file.
+
+    Args:
+        path: JSON file path.
+
+    Returns:
+        List of row dictionaries.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception as exc:
+        logging.warning("Could not load JSON rows from %s: %s", path.as_posix(), exc)
+    return []
+
+
+def diff_rows_by_identifier(prev_rows: List[Dict[str, Any]], curr_rows: List[Dict[str, Any]], id_key: str = "identifier") -> List[Dict[str, Any]]:
+    """
+    Compute a field-level diff between snapshots.
+
+    Compares previous vs current aggregated rows keyed by an identifier field. The
+    result is a list of change records describing added/removed/changed fields.
+
+    Args:
+        prev_rows: Previous snapshot rows.
+        curr_rows: Current snapshot rows.
+        id_key: Field used as the unique identifier. Defaults to "identifier".
+
+    Returns:
+        List of change dictionaries with keys like identifier/field/old/new/change_type.
+    """
+    prev_map = {r.get(id_key): r for r in prev_rows if r.get(id_key) is not None}
+    curr_ids = set()
+    changes: List[Dict[str, Any]] = []
+
+    for curr in curr_rows:
+        ident = curr.get(id_key)
+        curr_ids.add(ident)
+        prev = prev_map.get(ident)
+        if prev is None:
+            for field, new_val in curr.items():
+                if field == id_key:
+                    continue
+                changes.append({"identifier": ident, "field": field, "old": "", "new": new_val, "change_type": "added"})
+            continue
+
+        all_fields = set(prev.keys()) | set(curr.keys())
+        for field in all_fields:
+            if field == id_key:
+                continue
+            old_val = prev.get(field, "")
+            new_val = curr.get(field, "")
+            if old_val != new_val:
+                changes.append({"identifier": ident, "field": field, "old": old_val, "new": new_val, "change_type": "changed"})
+
+    for ident, prev in prev_map.items():
+        if ident in curr_ids:
+            continue
+        for field, old_val in prev.items():
+            if field == id_key:
+                continue
+            changes.append({"identifier": ident, "field": field, "old": old_val, "new": "", "change_type": "removed"})
+
+    return changes
+
+
 # ---------------------------
 # Main
 # ---------------------------
 
-def main(argv=None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     raw_args = list(argv) if argv is not None else sys.argv[1:]
     if not raw_args:
         show_start_instructions()
@@ -785,6 +1055,9 @@ def main(argv=None) -> int:
     contact_xlsx_path = subset_dir / timestamped_name(Path(contact_base).with_suffix(".xlsx").name, ts)
     server_json_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".json").name, ts)
     server_xlsx_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".xlsx").name, ts)
+    changes_json_path = output_dir / timestamped_name(marker_name(json_base, "changes"), ts)
+    changes_csv_path = output_dir / timestamped_name(marker_name(csv_base, "changes"), ts)
+    changes_xlsx_path = output_dir / timestamped_name(marker_name(xlsx_base, "changes"), ts)
 
     subsets_cfg = cfg["SUBSETS"]
     contact_fields = subsets_cfg["CONTACT_INFO"]
@@ -818,6 +1091,14 @@ def main(argv=None) -> int:
         modified_anchor = previous_run_at
         logging.info("Using previous run date for modified rows: %s", modified_anchor.isoformat())
 
+    previous_json_path = find_latest_snapshot(output_dir, json_base)
+    previous_rows: List[Dict[str, Any]] = []
+    if previous_json_path:
+        logging.info("Previous snapshot detected for diff: %s", previous_json_path.as_posix())
+        previous_rows = load_json_rows(previous_json_path)
+    else:
+        logging.info("No prior snapshot found for %s; skipping change diff.", json_base)
+
     try:
         html = fetch_page(session, url, username, password, verify_ca)
         rows = extract_json_data(html)
@@ -836,6 +1117,18 @@ def main(argv=None) -> int:
         write_json_snapshot(service_subset_rows, server_json_path)
         write_csv_with_headers(aggregated_rows, service_fields, server_csv_path)
         write_excel_table_with_headers(service_subset_rows, service_fields, server_xlsx_path, table_name="ServiceIps")
+
+        if previous_rows:
+            changes_rows = diff_rows_by_identifier(previous_rows, aggregated_rows, id_key="identifier")
+            if changes_rows:
+                change_headers = ["identifier", "field", "old", "new", "change_type"]
+                write_json_snapshot(changes_rows, changes_json_path)
+                write_csv_with_headers(changes_rows, change_headers, changes_csv_path)
+                write_excel_table_with_headers(changes_rows, change_headers, changes_xlsx_path, table_name="ChangedFields")
+                logging.info("Detected %d changed fields versus previous snapshot.", len(changes_rows))
+            else:
+                logging.info("No field-level changes detected versus previous snapshot.")
+
         if modified_anchor:
             modified_rows = filter_modified_rows(rows, modified_anchor)
             if modified_rows:
