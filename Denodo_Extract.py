@@ -40,12 +40,17 @@ FILES:
   EAMS_RUN_DATE: last_run.txt
   EAMS_CONTACT_INFO: contact_info.csv
   EAMS_SERVER_INFO: server_info.csv
+  # EAMS_SPLUNK_SERVER_FEED: optional (defaults to splunk_server_feed.csv)
   # EAMS_XLSX_OUTPUT: optional (defaults to same stem as CSV + .xlsx)
 DATA_SOURCE:  # or legacy DATASOURCE
   URL: https://denodo.example.local/report123
 AUTHENTICATION:
   SERVICE_NAME: denodo-prod
   USERNAME: user
+SUBSETS:
+  CONTACT_INFO: [field1, field2]
+  SERVICE_IPS: [field3, field4]
+  # SPLUNK_SERVER_FEED: [field5, field6]
 """
 
 from __future__ import annotations
@@ -229,7 +234,10 @@ def prompt_lookback_days() -> Optional[float]:
 
     root = tk.Tk()
     root.withdraw()
-    value = simpledialog.askstring("Lookback window", "Enter lookback in days (e.g., 2 or 12). Leave blank to skip:")
+    value = simpledialog.askstring(
+        "Lookback window",
+        "Enter lookback in days (e.g., 2, 0.5 for 12h, 1/24 ≈ 0.0417 for 1h). Leave blank to skip:",
+    )
     if value is None:
         return None  # cancelled
     value = value.strip()
@@ -534,7 +542,7 @@ def parse_last_modified(value: Any) -> Optional[datetime]:
         value: Input value which may be a string, datetime, or None.
 
     Returns:
-        A datetime if parseable; otherwise None.
+        A datetime if parsable; otherwise None.
     """
     if value is None:
         return None
@@ -1062,6 +1070,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     subsets_cfg = cfg["SUBSETS"]
     contact_fields = subsets_cfg["CONTACT_INFO"]
     service_fields = subsets_cfg["SERVICE_IPS"]
+    splunk_fields = subsets_cfg.get("SPLUNK_SERVER_FEED")
+
+    splunk_base = None
+    splunk_json_path = None
+    splunk_csv_path = None
+    splunk_xlsx_path = None
+    if splunk_fields:
+        splunk_base = ensure_named_file(files_cfg.get("EAMS_SPLUNK_SERVER_FEED", "splunk_server_feed.csv"), ".csv")
+        splunk_json_path = subset_dir / timestamped_name(Path(splunk_base).with_suffix(".json").name, ts)
+        splunk_csv_path = subset_dir / timestamped_name(splunk_base, ts)
+        splunk_xlsx_path = subset_dir / timestamped_name(Path(splunk_base).with_suffix(".xlsx").name, ts)
 
     auth = cfg["AUTHENTICATION"]
     service = auth["SERVICE_NAME"]
@@ -1107,6 +1126,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         contact_subset_rows = subset_rows(aggregated_rows, contact_fields)
         service_subset_rows = subset_rows(aggregated_rows, service_fields)
+        splunk_subset_rows = subset_rows(aggregated_rows, splunk_fields) if splunk_fields else None
 
         write_json_snapshot(aggregated_rows, json_path)
         write_csv(aggregated_rows, csv_path)
@@ -1117,6 +1137,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         write_json_snapshot(service_subset_rows, server_json_path)
         write_csv_with_headers(aggregated_rows, service_fields, server_csv_path)
         write_excel_table_with_headers(service_subset_rows, service_fields, server_xlsx_path, table_name="ServiceIps")
+        if splunk_subset_rows is not None:
+            write_json_snapshot(splunk_subset_rows, splunk_json_path)
+            write_csv_with_headers(aggregated_rows, splunk_fields, splunk_csv_path)
+            write_excel_table_with_headers(splunk_subset_rows, splunk_fields, splunk_xlsx_path, table_name="SplunkServerFeed")
 
         if previous_rows:
             changes_rows = diff_rows_by_identifier(previous_rows, aggregated_rows, id_key="identifier")
@@ -1170,25 +1194,47 @@ def main(argv: Optional[List[str]] = None) -> int:
             server_csv_path,
             server_xlsx_path,
         )
+        if splunk_subset_rows is not None:
+            logging.info(
+                "Splunk subset outputs:\n"
+                "  Splunk subset JSON: %s\n"
+                "  Splunk subset CSV:  %s\n"
+                "  Splunk subset XLSX: %s",
+                splunk_json_path,
+                splunk_csv_path,
+                splunk_xlsx_path,
+            )
         if args.gui:
             try:
                 import tkinter as tk
                 from tkinter import messagebox
                 root = tk.Tk()
                 root.withdraw()
+                message_lines = [
+                    "Completed successfully.",
+                    "",
+                    "Outputs:",
+                    f"JSON: {json_path}",
+                    f"CSV: {csv_path}",
+                    f"XLSX: {xlsx_path}",
+                    f"Contact subset JSON: {contact_json_path}",
+                    f"Contact subset CSV: {contact_csv_path}",
+                    f"Contact subset XLSX: {contact_xlsx_path}",
+                    f"Server subset JSON: {server_json_path}",
+                    f"Server subset CSV: {server_csv_path}",
+                    f"Server subset XLSX: {server_xlsx_path}",
+                ]
+                if splunk_subset_rows is not None:
+                    message_lines.extend(
+                        [
+                            f"Splunk subset JSON: {splunk_json_path}",
+                            f"Splunk subset CSV: {splunk_csv_path}",
+                            f"Splunk subset XLSX: {splunk_xlsx_path}",
+                        ]
+                    )
                 messagebox.showinfo(
                     "Denodo Extract",
-                    "Completed successfully.\n\n"
-                    f"Outputs:\n"
-                    f"JSON: {json_path}\n"
-                    f"CSV: {csv_path}\n"
-                    f"XLSX: {xlsx_path}\n"
-                    f"Contact subset JSON: {contact_json_path}\n"
-                    f"Contact subset CSV: {contact_csv_path}\n"
-                    f"Contact subset XLSX: {contact_xlsx_path}\n"
-                    f"Server subset JSON: {server_json_path}\n"
-                    f"Server subset CSV: {server_csv_path}\n"
-                    f"Server subset XLSX: {server_xlsx_path}",
+                    "\n".join(message_lines),
                 )
             except Exception:
                 # GUI messaging is best-effort
