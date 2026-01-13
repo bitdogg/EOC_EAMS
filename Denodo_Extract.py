@@ -28,8 +28,16 @@ How to run (GUI):
 
 YAML expectations (minimal):
 STORAGE:
+  BACKEND: local_sync  # or sharepoint
   LOCAL_SYNC:
     ROOT_DIR: C:\\Data\\Denodo
+  # For SharePoint backend (Microsoft Graph app-only auth):
+  # SHAREPOINT:
+  #   SITE_URL: https://contoso.sharepoint.com/sites/eams
+  #   DOCUMENT_LIBRARY: Shared Documents
+  #   BASE_FOLDER: EAMS
+  #   # TENANT_ID and CLIENT_ID can be set here or via env vars.
+  #   # CLIENT_SECRET_ENV (optional) points to an env var name for the secret.
 PATHS:
   OUTPUT_DIR: exports
   SUBSET_DIR: output\\subsets
@@ -60,11 +68,16 @@ import csv
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import os
+import posixpath
 import re
 import sys
+import tempfile
+import time
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import re
 _ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
@@ -306,11 +319,25 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # STORAGE
     storage = cfg["STORAGE"]
-    if "LOCAL_SYNC" not in storage or not isinstance(storage["LOCAL_SYNC"], dict):
-        raise ConfigError("STORAGE.LOCAL_SYNC is required and must be a mapping")
-    local_sync = storage["LOCAL_SYNC"]
-    if "ROOT_DIR" not in local_sync or not isinstance(local_sync["ROOT_DIR"], str) or not local_sync["ROOT_DIR"].strip():
-        raise ConfigError("STORAGE.LOCAL_SYNC.ROOT_DIR is required and must be a non-empty string")
+    backend = str(storage.get("BACKEND", "local_sync")).strip().lower()
+    if backend not in {"local_sync", "sharepoint"}:
+        raise ConfigError("STORAGE.BACKEND must be 'local_sync' or 'sharepoint'")
+    storage["BACKEND"] = backend
+    if backend == "local_sync":
+        if "LOCAL_SYNC" not in storage or not isinstance(storage["LOCAL_SYNC"], dict):
+            raise ConfigError("STORAGE.LOCAL_SYNC is required and must be a mapping")
+        local_sync = storage["LOCAL_SYNC"]
+        if "ROOT_DIR" not in local_sync or not isinstance(local_sync["ROOT_DIR"], str) or not local_sync["ROOT_DIR"].strip():
+            raise ConfigError("STORAGE.LOCAL_SYNC.ROOT_DIR is required and must be a non-empty string")
+    else:
+        if "SHAREPOINT" not in storage or not isinstance(storage["SHAREPOINT"], dict):
+            raise ConfigError("STORAGE.SHAREPOINT is required and must be a mapping when BACKEND=sharepoint")
+        sharepoint_cfg = storage["SHAREPOINT"]
+        for key in ("SITE_URL", "DOCUMENT_LIBRARY"):
+            if key not in sharepoint_cfg or not isinstance(sharepoint_cfg[key], str) or not sharepoint_cfg[key].strip():
+                raise ConfigError(f"STORAGE.SHAREPOINT.{key} is required and must be a non-empty string")
+        if "BASE_FOLDER" in sharepoint_cfg and (not isinstance(sharepoint_cfg["BASE_FOLDER"], str)):
+            raise ConfigError("STORAGE.SHAREPOINT.BASE_FOLDER must be a string if provided")
 
     # PATHS
     paths = cfg["PATHS"]
@@ -365,6 +392,144 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 raise ConfigError(f"SUBSETS.{key} entries must be non-empty strings")
 
     return cfg
+
+
+def load_graph_credentials(cfg: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    Resolve Microsoft Graph credentials for SharePoint access.
+
+    Prefers explicit config values when provided; otherwise reads environment
+    variables GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET.
+    """
+    storage = cfg["STORAGE"]["SHAREPOINT"]
+    tenant_id = str(storage.get("TENANT_ID") or os.getenv("GRAPH_TENANT_ID", "")).strip()
+    client_id = str(storage.get("CLIENT_ID") or os.getenv("GRAPH_CLIENT_ID", "")).strip()
+    client_secret = os.getenv("GRAPH_CLIENT_SECRET", "").strip()
+    if storage.get("CLIENT_SECRET_ENV"):
+        client_secret = os.getenv(str(storage.get("CLIENT_SECRET_ENV")), "").strip()
+    if not tenant_id or not client_id or not client_secret:
+        raise ConfigError(
+            "SharePoint backend requires Microsoft Graph credentials. "
+            "Set GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET (or provide "
+            "STORAGE.SHAREPOINT.TENANT_ID/CLIENT_ID and STORAGE.SHAREPOINT.CLIENT_SECRET_ENV)."
+        )
+    return tenant_id, client_id, client_secret
+
+
+class SharePointClient:
+    def __init__(self, site_url: str, document_library: str, base_folder: str,
+                 tenant_id: str, client_id: str, client_secret: str) -> None:
+        self.site_url = site_url
+        self.document_library = document_library
+        self.base_folder = base_folder.strip().strip("/")
+        self.tenant_id = tenant_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.session = requests.Session()
+        self._access_token: Optional[str] = None
+        self._token_expires_at = 0.0
+        self._site_id: Optional[str] = None
+        self._drive_id: Optional[str] = None
+
+    def _token(self) -> str:
+        if self._access_token and time.time() < self._token_expires_at:
+            return self._access_token
+        token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        }
+        resp = self.session.post(token_url, data=data, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        self._access_token = payload["access_token"]
+        expires_in = int(payload.get("expires_in", 3600))
+        self._token_expires_at = time.time() + max(expires_in - 60, 0)
+        return self._access_token
+
+    def _headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self._token()}"}
+
+    def _site_id(self) -> str:
+        if self._site_id:
+            return self._site_id
+        parsed = urlparse(self.site_url)
+        if not parsed.netloc or not parsed.path.strip("/"):
+            raise ConfigError("STORAGE.SHAREPOINT.SITE_URL must include a site path (e.g., /sites/eams).")
+        site_path = parsed.path
+        url = f"https://graph.microsoft.com/v1.0/sites/{parsed.netloc}:{site_path}"
+        resp = self.session.get(url, headers=self._headers(), timeout=30)
+        resp.raise_for_status()
+        self._site_id = resp.json()["id"]
+        return self._site_id
+
+    def _drive_id(self) -> str:
+        if self._drive_id:
+            return self._drive_id
+        site_id = self._site_id()
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+        resp = self.session.get(url, headers=self._headers(), timeout=30)
+        resp.raise_for_status()
+        drives = resp.json().get("value", [])
+        for drive in drives:
+            if drive.get("name") == self.document_library:
+                self._drive_id = drive["id"]
+                return self._drive_id
+        raise ConfigError(f"Document library '{self.document_library}' not found in site {self.site_url}.")
+
+    def _item_exists(self, path: str) -> bool:
+        drive_id = self._drive_id()
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{path}"
+        resp = self.session.get(url, headers=self._headers(), timeout=30)
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True
+
+    def ensure_folder_path(self, folder_path: str) -> None:
+        folder_path = folder_path.strip().strip("/")
+        if not folder_path:
+            return
+        drive_id = self._drive_id()
+        current = ""
+        for segment in folder_path.split("/"):
+            current = f"{current}/{segment}" if current else segment
+            if self._item_exists(current):
+                continue
+            parent = posixpath.dirname(current)
+            if parent:
+                url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent}:/children"
+            else:
+                url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children"
+            payload = {"name": segment, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"}
+            resp = self.session.post(url, headers=self._headers(), json=payload, timeout=30)
+            if resp.status_code == 409:
+                continue
+            resp.raise_for_status()
+
+    def download_file(self, remote_path: str, local_path: Path) -> bool:
+        remote_path = remote_path.strip().strip("/")
+        drive_id = self._drive_id()
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{remote_path}:/content"
+        resp = self.session.get(url, headers=self._headers(), timeout=30)
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(resp.content)
+        return True
+
+    def upload_file(self, local_path: Path, remote_path: str) -> None:
+        remote_path = remote_path.strip().strip("/")
+        folder = posixpath.dirname(remote_path)
+        if folder:
+            self.ensure_folder_path(folder)
+        drive_id = self._drive_id()
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{remote_path}:/content"
+        resp = self.session.put(url, headers=self._headers(), data=local_path.read_bytes(), timeout=60)
+        resp.raise_for_status()
 
 
 # ---------------------------
@@ -532,6 +697,16 @@ def write_run_date(run_date_path: Path, when: datetime) -> None:
     stamp = when.isoformat(timespec="seconds")
     run_date_path.write_text(stamp + "\n", encoding="utf-8")
     logging.info("Run date recorded: %s -> %s", run_date_path.as_posix(), stamp)
+
+
+def relative_posix_path(path: Path, base_dir: Path) -> str:
+    """
+    Return a POSIX relative path if possible; otherwise fall back to filename.
+    """
+    try:
+        return PurePosixPath(path.relative_to(base_dir)).as_posix()
+    except ValueError:
+        return path.name
 
 
 def parse_last_modified(value: Any) -> Optional[datetime]:
@@ -986,12 +1161,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = validate_config(load_config(cfg_path))
 
     # Resolve directories
-    storage_cfg = cfg["STORAGE"]["LOCAL_SYNC"]
-    root_dir = Path(storage_cfg["ROOT_DIR"])
+    storage_backend = cfg["STORAGE"]["BACKEND"]
     paths_cfg = cfg["PATHS"]
-    default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
-    if not default_output_dir.is_absolute():
-        default_output_dir = root_dir / default_output_dir
+    sharepoint_client: Optional[SharePointClient] = None
+    remote_output_prefix = ""
+    remote_subset_prefix = ""
+    if storage_backend == "local_sync":
+        storage_cfg = cfg["STORAGE"]["LOCAL_SYNC"]
+        root_dir = Path(storage_cfg["ROOT_DIR"])
+        default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
+        if not default_output_dir.is_absolute():
+            default_output_dir = root_dir / default_output_dir
+    else:
+        sharepoint_cfg = cfg["STORAGE"]["SHAREPOINT"]
+        tenant_id, client_id, client_secret = load_graph_credentials(cfg)
+        sharepoint_client = SharePointClient(
+            site_url=sharepoint_cfg["SITE_URL"],
+            document_library=sharepoint_cfg["DOCUMENT_LIBRARY"],
+            base_folder=sharepoint_cfg.get("BASE_FOLDER", ""),
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        staging_root = Path(tempfile.mkdtemp(prefix="denodo_extract_"))
+        default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
+        if not default_output_dir.is_absolute():
+            default_output_dir = staging_root / default_output_dir
+        base_folder = sharepoint_cfg.get("BASE_FOLDER", "").strip().strip("/")
+        output_suffix = PurePosixPath(paths_cfg["OUTPUT_DIR"]).as_posix().lstrip("/")
+        subset_suffix = PurePosixPath(paths_cfg["SUBSET_DIR"]).as_posix().lstrip("/")
+        remote_output_prefix = posixpath.join(base_folder, output_suffix) if base_folder else output_suffix
+        remote_subset_prefix = posixpath.join(base_folder, subset_suffix) if base_folder else subset_suffix
 
     if args.use_config_dir:
         output_dir = cfg_path.parent
@@ -1096,6 +1296,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     session = create_session()
     verify_ca = interpret_verify_ca(args.verify_ca)
+    if sharepoint_client and remote_output_prefix:
+        remote_run_date_path = posixpath.join(
+            remote_output_prefix,
+            relative_posix_path(run_date_path, output_dir),
+        )
+        try:
+            if sharepoint_client.download_file(remote_run_date_path, run_date_path):
+                logging.info("Downloaded SharePoint run date: %s", remote_run_date_path)
+        except Exception as exc:
+            logging.warning("Failed to download SharePoint run date (%s): %s", remote_run_date_path, exc)
     previous_run_at = parse_run_date(run_date_path)
     modified_anchor: Optional[datetime] = None
 
@@ -1172,6 +1382,47 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 logging.info("No rows with lastmodifieddate newer than %s", modified_anchor.isoformat())
         write_run_date(run_date_path, run_at)
+
+        if sharepoint_client and remote_output_prefix and remote_subset_prefix:
+            uploads: List[Tuple[Path, str]] = []
+            output_files = [
+                json_path,
+                csv_path,
+                xlsx_path,
+                changes_json_path,
+                changes_csv_path,
+                changes_xlsx_path,
+                run_date_path,
+            ]
+            subset_files = [
+                contact_csv_path,
+                contact_json_path,
+                contact_xlsx_path,
+                server_csv_path,
+                server_json_path,
+                server_xlsx_path,
+            ]
+            if splunk_fields and splunk_json_path and splunk_csv_path and splunk_xlsx_path:
+                subset_files.extend([splunk_json_path, splunk_csv_path, splunk_xlsx_path])
+
+            for local_file in output_files:
+                if not local_file:
+                    continue
+                rel_path = relative_posix_path(local_file, output_dir)
+                uploads.append((local_file, posixpath.join(remote_output_prefix, rel_path)))
+
+            for local_file in subset_files:
+                if not local_file:
+                    continue
+                rel_path = relative_posix_path(local_file, subset_dir)
+                uploads.append((local_file, posixpath.join(remote_subset_prefix, rel_path)))
+
+            for local_path, remote_path in uploads:
+                try:
+                    sharepoint_client.upload_file(local_path, remote_path)
+                    logging.info("Uploaded to SharePoint: %s", remote_path)
+                except Exception as exc:
+                    logging.error("Failed to upload %s to SharePoint (%s): %s", local_path, remote_path, exc)
         logging.info("All done ✔")
         logging.info(
             "Outputs:\n"

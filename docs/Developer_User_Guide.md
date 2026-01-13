@@ -52,6 +52,9 @@ configuration for each backend. Your sample config already follows that pattern.
   or OneDrive drive.
 - Store a `SITE_URL`, `DOCUMENT_LIBRARY`, and optional `BASE_FOLDER` to resolve
   the remote paths, or store stable IDs (drive/item IDs) if you prefer.
+- App-only auth can be provided via environment variables: `GRAPH_TENANT_ID`,
+  `GRAPH_CLIENT_ID`, and `GRAPH_CLIENT_SECRET` (or `CLIENT_SECRET_ENV` in YAML
+  to point at a secret environment variable).
 
 **Pros**
 - Ideal for scheduled jobs and servers (no sync client required).
