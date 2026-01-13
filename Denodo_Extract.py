@@ -79,21 +79,18 @@ from logging.handlers import RotatingFileHandler
 import os
 import posixpath
 
-
 import re
+_ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+_EXCEL_CELL_LIMIT = 32767
+
 import sys
 import tempfile
 import time
-
 
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
-
-
-
-_EXCEL_CELL_LIMIT = 32767
 
 import requests
 import yaml
@@ -354,6 +351,8 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if backend not in {"local_sync", "sharepoint"}:
         raise ConfigError("STORAGE.BACKEND must be 'local_sync' or 'sharepoint'")
 
+    # PATHS
+    paths = cfg["PATHS"]
     for key in ("OUTPUT_DIR", "SUBSET_DIR"):
         if key not in paths or not isinstance(paths[key], str) or not paths[key].strip():
             raise ConfigError(f"PATHS.{key} is required and must be a non-empty string")
@@ -745,6 +744,7 @@ def relative_posix_path(path: Path, base_dir: Path) -> str:
         return path.name
 
 
+
 def parse_last_modified(value: Any) -> Optional[datetime]:
     """
     Parse a last-modified timestamp value from the dataset.
@@ -756,6 +756,21 @@ def parse_last_modified(value: Any) -> Optional[datetime]:
         A datetime if parsable; otherwise None.
     """
     if value is None:
+        return None
+    
+    if isinstance(value, datetime):
+        return value
+    
+    if isinstance(value, str):
+        try:
+            # Try parsing common datetime formats
+            # Adjust format string based on your data's timestamp format
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            return None
+    
+    return None
+
 
 
 def filter_modified_rows(rows: Iterable[Dict[str, Any]], since: datetime) -> List[Dict[str, Any]]:
