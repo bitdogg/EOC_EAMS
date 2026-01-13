@@ -29,8 +29,16 @@ How to run (GUI):
 YAML expectations (minimal):
 STORAGE:
   BACKEND: local_sync  # or sharepoint
+
   LOCAL_SYNC:
     ROOT_DIR: C:\\Data\\Denodo
+  # For SharePoint backend (Microsoft Graph app-only auth):
+  # SHAREPOINT:
+  #   SITE_URL: https://contoso.sharepoint.com/sites/eams
+  #   DOCUMENT_LIBRARY: Shared Documents
+  #   BASE_FOLDER: EAMS
+  #   # TENANT_ID and CLIENT_ID can be set here or via env vars.
+  #   # CLIENT_SECRET_ENV (optional) points to an env var name for the secret.
   # For SharePoint backend (Microsoft Graph app-only auth):
   # SHAREPOINT:
   #   SITE_URL: https://contoso.sharepoint.com/sites/eams
@@ -70,17 +78,21 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import posixpath
+
+
 import re
 import sys
 import tempfile
 import time
+
+
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import re
-_ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
 _EXCEL_CELL_LIMIT = 32767
 
 import requests
@@ -338,9 +350,10 @@ def validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 raise ConfigError(f"STORAGE.SHAREPOINT.{key} is required and must be a non-empty string")
         if "BASE_FOLDER" in sharepoint_cfg and (not isinstance(sharepoint_cfg["BASE_FOLDER"], str)):
             raise ConfigError("STORAGE.SHAREPOINT.BASE_FOLDER must be a string if provided")
+    backend = str(storage.get("BACKEND", "local_sync")).strip().lower()
+    if backend not in {"local_sync", "sharepoint"}:
+        raise ConfigError("STORAGE.BACKEND must be 'local_sync' or 'sharepoint'")
 
-    # PATHS
-    paths = cfg["PATHS"]
     for key in ("OUTPUT_DIR", "SUBSET_DIR"):
         if key not in paths or not isinstance(paths[key], str) or not paths[key].strip():
             raise ConfigError(f"PATHS.{key} is required and must be a non-empty string")
@@ -709,6 +722,29 @@ def relative_posix_path(path: Path, base_dir: Path) -> str:
         return path.name
 
 
+def parse_graph_datetime(value: str) -> Optional[datetime]:
+    """
+    Parse Graph API datetime strings like 2024-01-01T12:34:56Z.
+    """
+    if not value:
+        return None
+    cleaned = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+
+def relative_posix_path(path: Path, base_dir: Path) -> str:
+    """
+    Return a POSIX relative path if possible; otherwise fall back to filename.
+    """
+    try:
+        return PurePosixPath(path.relative_to(base_dir)).as_posix()
+    except ValueError:
+        return path.name
+
+
 def parse_last_modified(value: Any) -> Optional[datetime]:
     """
     Parse a last-modified timestamp value from the dataset.
@@ -720,15 +756,6 @@ def parse_last_modified(value: Any) -> Optional[datetime]:
         A datetime if parsable; otherwise None.
     """
     if value is None:
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    try:
-        cleaned = s.replace("Z", "+00:00") if s.endswith("Z") else s
-        return datetime.fromisoformat(cleaned)
-    except Exception:
-        return None
 
 
 def filter_modified_rows(rows: Iterable[Dict[str, Any]], since: datetime) -> List[Dict[str, Any]]:
@@ -1055,6 +1082,24 @@ def find_latest_snapshot(output_dir: Path, base_name: str) -> Optional[Path]:
     return candidates[-1] if candidates else None
 
 
+def find_latest_remote_snapshot(client: SharePointClient, remote_folder: str, base_name: str) -> Optional[str]:
+    """
+    Find the most recent remote snapshot file path for a given base name.
+    """
+    suffix = f"_{Path(base_name).name}"
+    candidates = []
+    for item in client.list_children(remote_folder):
+        name = item.get("name", "")
+        if not name.endswith(suffix):
+            continue
+        modified = parse_graph_datetime(item.get("lastModifiedDateTime", ""))
+        candidates.append((modified or datetime.min, name))
+    if not candidates:
+        return None
+    _, best_name = sorted(candidates, key=lambda entry: entry[0])[-1]
+    return posixpath.join(remote_folder, best_name)
+
+
 def load_json_rows(path: Path) -> List[Dict[str, Any]]:
     """
     Load rows from a JSON snapshot file.
@@ -1161,6 +1206,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = validate_config(load_config(cfg_path))
 
     # Resolve directories
+    storage_backend = cfg["STORAGE"]["BACKEND"]
+    paths_cfg = cfg["PATHS"]
+    sharepoint_client: Optional[SharePointClient] = None
+    remote_output_prefix = ""
+    remote_subset_prefix = ""
+    if storage_backend == "local_sync":
+        storage_cfg = cfg["STORAGE"]["LOCAL_SYNC"]
+        root_dir = Path(storage_cfg["ROOT_DIR"])
+        default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
+        if not default_output_dir.is_absolute():
+            default_output_dir = root_dir / default_output_dir
+    else:
+        sharepoint_cfg = cfg["STORAGE"]["SHAREPOINT"]
+        tenant_id, client_id, client_secret = load_graph_credentials(cfg)
+        sharepoint_client = SharePointClient(
+            site_url=sharepoint_cfg["SITE_URL"],
+            document_library=sharepoint_cfg["DOCUMENT_LIBRARY"],
+            base_folder=sharepoint_cfg.get("BASE_FOLDER", ""),
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        staging_root = Path(tempfile.mkdtemp(prefix="denodo_extract_"))
+        default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
+        if not default_output_dir.is_absolute():
+            default_output_dir = staging_root / default_output_dir
+        base_folder = sharepoint_cfg.get("BASE_FOLDER", "").strip().strip("/")
+        output_suffix = PurePosixPath(paths_cfg["OUTPUT_DIR"]).as_posix().lstrip("/")
+        subset_suffix = PurePosixPath(paths_cfg["SUBSET_DIR"]).as_posix().lstrip("/")
+        remote_output_prefix = posixpath.join(base_folder, output_suffix) if base_folder else output_suffix
+        remote_subset_prefix = posixpath.join(base_folder, subset_suffix) if base_folder else subset_suffix
     storage_backend = cfg["STORAGE"]["BACKEND"]
     paths_cfg = cfg["PATHS"]
     sharepoint_client: Optional[SharePointClient] = None
@@ -1306,6 +1382,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logging.info("Downloaded SharePoint run date: %s", remote_run_date_path)
         except Exception as exc:
             logging.warning("Failed to download SharePoint run date (%s): %s", remote_run_date_path, exc)
+    if sharepoint_client and remote_output_prefix:
+        remote_run_date_path = posixpath.join(
+            remote_output_prefix,
+            relative_posix_path(run_date_path, output_dir),
+        )
+        try:
+            if sharepoint_client.download_file(remote_run_date_path, run_date_path):
+                logging.info("Downloaded SharePoint run date: %s", remote_run_date_path)
+        except Exception as exc:
+            logging.warning("Failed to download SharePoint run date (%s): %s", remote_run_date_path, exc)
     previous_run_at = parse_run_date(run_date_path)
     modified_anchor: Optional[datetime] = None
 
@@ -1319,6 +1405,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif previous_run_at:
         modified_anchor = previous_run_at
         logging.info("Using previous run date for modified rows: %s", modified_anchor.isoformat())
+
+    if sharepoint_client and remote_output_prefix:
+        remote_snapshot_path = find_latest_remote_snapshot(sharepoint_client, remote_output_prefix, json_base)
+        if remote_snapshot_path:
+            local_snapshot_path = output_dir / Path(remote_snapshot_path).name
+            try:
+                if sharepoint_client.download_file(remote_snapshot_path, local_snapshot_path):
+                    logging.info("Downloaded SharePoint snapshot: %s", remote_snapshot_path)
+            except Exception as exc:
+                logging.warning("Failed to download SharePoint snapshot (%s): %s", remote_snapshot_path, exc)
 
     previous_json_path = find_latest_snapshot(output_dir, json_base)
     previous_rows: List[Dict[str, Any]] = []
@@ -1382,6 +1478,47 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 logging.info("No rows with lastmodifieddate newer than %s", modified_anchor.isoformat())
         write_run_date(run_date_path, run_at)
+
+        if sharepoint_client and remote_output_prefix and remote_subset_prefix:
+            uploads: List[Tuple[Path, str]] = []
+            output_files = [
+                json_path,
+                csv_path,
+                xlsx_path,
+                changes_json_path,
+                changes_csv_path,
+                changes_xlsx_path,
+                run_date_path,
+            ]
+            subset_files = [
+                contact_csv_path,
+                contact_json_path,
+                contact_xlsx_path,
+                server_csv_path,
+                server_json_path,
+                server_xlsx_path,
+            ]
+            if splunk_fields and splunk_json_path and splunk_csv_path and splunk_xlsx_path:
+                subset_files.extend([splunk_json_path, splunk_csv_path, splunk_xlsx_path])
+
+            for local_file in output_files:
+                if not local_file:
+                    continue
+                rel_path = relative_posix_path(local_file, output_dir)
+                uploads.append((local_file, posixpath.join(remote_output_prefix, rel_path)))
+
+            for local_file in subset_files:
+                if not local_file:
+                    continue
+                rel_path = relative_posix_path(local_file, subset_dir)
+                uploads.append((local_file, posixpath.join(remote_subset_prefix, rel_path)))
+
+            for local_path, remote_path in uploads:
+                try:
+                    sharepoint_client.upload_file(local_path, remote_path)
+                    logging.info("Uploaded to SharePoint: %s", remote_path)
+                except Exception as exc:
+                    logging.error("Failed to upload %s to SharePoint (%s): %s", local_path, remote_path, exc)
 
         if sharepoint_client and remote_output_prefix and remote_subset_prefix:
             uploads: List[Tuple[Path, str]] = []
