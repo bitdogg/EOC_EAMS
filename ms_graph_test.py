@@ -19,6 +19,7 @@ import argparse
 import sys
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import requests
 import yaml
@@ -59,7 +60,7 @@ def load_config(path: str) -> SPConfig:
     )
 
 
-def get_access_token(cfg: SPConfig) -> str:
+def get_access_token(cfg: SPConfig) -> dict:
     authority = f"https://login.microsoftonline.com/{cfg.tenant_id}"
     app = msal.ConfidentialClientApplication(
         client_id=cfg.client_id,
@@ -71,7 +72,7 @@ def get_access_token(cfg: SPConfig) -> str:
     result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
     if "access_token" not in result:
         raise RuntimeError(f"Token acquisition failed: {result.get('error')} - {result.get('error_description')}")
-    return result["access_token"]
+    return result
 
 
 def graph_get(url: str, token: str, *, params: dict | None = None) -> dict:
@@ -113,8 +114,23 @@ def main() -> int:
     cfg = load_config(args.config)
 
     print("1) Getting access token...")
-    token = get_access_token(cfg)
+    token_result = get_access_token(cfg)
+    token = token_result["access_token"]
     print("   OK")
+    # Safe token metadata for user visibility (no secrets).
+    for key in ["token_type", "expires_in", "ext_expires_in", "expires_on", "scope"]:
+        if key in token_result:
+            value = token_result[key]
+            if key in ["expires_in", "ext_expires_in"]:
+                print(f"   {key}: {value} seconds")
+            elif key == "expires_on":
+                try:
+                    ts = datetime.fromtimestamp(int(value), tz=timezone.utc)
+                    print(f"   {key}: {value} (epoch seconds, {ts.isoformat()} UTC)")
+                except (TypeError, ValueError, OSError):
+                    print(f"   {key}: {value} (epoch seconds)")
+            else:
+                print(f"   {key}: {value}")
 
     print("2) Resolving SharePoint site...")
     site_id = resolve_site_id(cfg, token)
