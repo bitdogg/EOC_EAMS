@@ -10,7 +10,7 @@ SharePoint/Teams folder connectivity test (Microsoft Graph)
 Install:
   pip install msal requests pyyaml
 Run:
-  python sp_connect_test.py --config sp_test.yml
+  python sp_connect_test.py --config MS_Graph_Test.yaml
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def resolve_folder_item(drive_id: str, folder_path: str, token: str) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to YAML config (sp_test.yml)")
+    ap.add_argument("--config", required=True, help="Path to YAML config (MS_Graph_Test.yaml)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
