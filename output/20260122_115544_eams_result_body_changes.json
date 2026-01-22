@@ -1,0 +1,108 @@
+[
+  {
+    "identifier": "APP500875",
+    "field": "technologyremediationactivity_0",
+    "old": [
+      " 01/21/2026; Microsoft Windows Server 2016 R2; 1st Contact – Awaiting Response; 1/21/2026 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Management to notify them that this technology is approaching EOL and requested their plans for remediation. | 11/21/2025; Microsoft Windows Server 2012 R2; Tech refresh planned; 11/24/2025 - Per Cindy Reichelt, this EOL technology will continue to be used thru March 2026; then excessed.\n\n11/21/2025 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Services to notify them that this technology is approaching EOL and requested their latest plans for remediation.\n\n3/11/25 - Sent email to POCs.\n6/26/24 - In the process of upgrading to Windows Server 2022 by January 2025.\n2/12/24 - Sent email to Cindy Reichelt and Robert Mikkelsen.\n11/15/23 - Sent email to Cindy Reichelt and Robert Mikkelsen.\n7/17/23 - Per Cindy Reichelt, EDC provide patches but do not provide upgrades.  Upgrade to Server 2019 planned.\nPer Cindy Reichelt, Abacus will replace CountOps.  Abacus is planned for deployment in FY23, but both applications will run concurrently during transitional period.\n11/10/22 - Sent email to Robert Mikkelsen. | 12/01/2025; SoftVelocity Clarion 11.x; Tech refresh planned; 12/1/2025 - This solution was identified as an APM First Notice in December 2025.  Email sent per APM Process. Per POC:  Clarion 12 has been purchased and is currently in testing. Implementation estimated date: (also) March 2026\n\n11/21/2025 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Services to notify them that this technology is approaching EOL and requested their plans for remediation.\n\n7/8/2025 - ADE-020 sent an email to Robert Mikkelson, Steven A Bennett, and James A Caron requesting their remediation plans on moving off this technology version. Steven and James are backups for Robert while he is out.\n\n3/11/25 - Sent email to POCs."
+    ],
+    "new": [
+      " 01/21/2026; Microsoft Windows Server 2016 R2; 1st Contact – Awaiting Response; 1/21/2026 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Management to notify them that this technology is approaching EOL and requested their plans for remediation. | 01/22/2026; Microsoft Windows Server 2012 R2; Disposal Planned; 1/22/2026 - Per Cindy Reichelt, the CountOps application is targeted for shut down within CY 2027. This technology will continue to be used thru CY 2026, then excessed. \n\n\n11/24/2025 - Per Cindy Reichelt, this EOL technology will continue to be used thru March 2026; then excessed.\n\n11/21/2025 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Services to notify them that this technology is approaching EOL and requested their latest plans for remediation.\n\n3/11/25 - Sent email to POCs.\n6/26/24 - In the process of upgrading to Windows Server 2022 by January 2025.\n2/12/24 - Sent email to Cindy Reichelt and Robert Mikkelsen.\n11/15/23 - Sent email to Cindy Reichelt and Robert Mikkelsen.\n7/17/23 - Per Cindy Reichelt, EDC provide patches but do not provide upgrades.  Upgrade to Server 2019 planned.\nPer Cindy Reichelt, Abacus will replace CountOps.  Abacus is planned for deployment in FY23, but both applications will run concurrently during transitional period.\n11/10/22 - Sent email to Robert Mikkelsen. | 12/01/2025; SoftVelocity Clarion 11.x; Tech refresh planned; 12/1/2025 - This solution was identified as an APM First Notice in December 2025.  Email sent per APM Process. Per POC:  Clarion 12 has been purchased and is currently in testing. Implementation estimated date: (also) March 2026\n\n11/21/2025 - ADE-020 sent an email to Cindy Reichelt, Todd Hamer, Robert Mikkelsen, and Mission Partnership Services to notify them that this technology is approaching EOL and requested their plans for remediation.\n\n7/8/2025 - ADE-020 sent an email to Robert Mikkelson, Steven A Bennett, and James A Caron requesting their remediation plans on moving off this technology version. Steven and James are backups for Robert while he is out.\n\n3/11/25 - Sent email to POCs."
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP500875",
+    "field": "lastmodifieddate",
+    "old": [
+      "2026-01-21T11:31:33.32"
+    ],
+    "new": [
+      "2026-01-22T11:27:02.113"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "description",
+    "old": "",
+    "new": [
+      "The Office of Safety Standards (OSS) Document Control System (OSS DCS), is the primary project management tool OSS executives, managers, and employees use to coordinate memorandums and letters for grid and signature coordination, and to monitor and track projects – including: Congressional inquiries, draft legislation, NTSB and FAA Safety Recommendations, petitions for rulemaking and exemptions, requests from air carriers and operators across the National Airspace System, requests for technical support from FAA Flight Standards Offices across the nation, ICAO document reviews and briefings, civil aviation authority inquiries from around the world, and to manage and process revisions to orders, advisory circulars, Information for Operators, Safety Alerts for Operators, notices, FAA Order 8900.1 and other Orders.\n\nThis system provides reporting functionality so managers and their team members can effectively monitor suspense dates, track, and prioritize work within the OSS, and it provides essential data FAA managers use to quantify staffing and funding resource allocations.\n\nThe system also provides links to project folders so all documentation associated with a given project can be stored during the pre-decision phase (Note: after a final decision is made signed documents are moved to a shared drive that is approved for records management storage and retention purposes), and the system provides managers and team members with automated email notifications when project status changes.\n\nThis essential tool directly supports the FAA’s efforts to efficiently promote commerce within the US, and to coordinate and collaborate with global partners around the world.\n"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "businesscontactsemail",
+    "old": [
+      "christopher.booze@faa.gov"
+    ],
+    "new": [
+      "christopher.booze@faa.gov; paul.ramirez@faa.gov"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "businesscontacts_0",
+    "old": [
+      "Christopher Booze "
+    ],
+    "new": [
+      "Christopher Booze ; Ramirez, Paul A "
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "justification",
+    "old": [
+      "New discovery in FY26"
+    ],
+    "new": [
+      "New discovery in FY26 - verified with POCs"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "primarybusinesscontacts_0",
+    "old": [
+      "Christopher Booze "
+    ],
+    "new": [
+      "Christopher Booze ; Ramirez, Paul A "
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "verificationstatus",
+    "old": [
+      "Pending Portfolio Manager Review"
+    ],
+    "new": [
+      "Validated by Business Partner"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "verificationdate",
+    "old": "",
+    "new": [
+      "2026-01-22"
+    ],
+    "change_type": "changed"
+  },
+  {
+    "identifier": "APP801363",
+    "field": "lastmodifieddate",
+    "old": [
+      "2025-12-17T12:44:06.56"
+    ],
+    "new": [
+      "2026-01-22T11:26:08.033"
+    ],
+    "change_type": "changed"
+  }
+]

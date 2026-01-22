@@ -12,7 +12,10 @@ STORAGE:
     SITE_URL: https://tenant.sharepoint.com/sites/EOC
     DOCUMENT_LIBRARY: TMS-AFN-AIF-010-EOC - Works in Progress
     BASE_FOLDER: EAMS   # optional
-
+    TENANT_ID: 2b69d099-dc61-447b-84c8-001733d8be3a
+    CLIENT_ID: 3beb0119-f197-4b3b-916b-2d53cd550f1e
+    CLIENT_SECRET_ENV: GRAPH_CLIENT_SECRET
+    OPEN_IN_BROWSER: false
 PATHS:
   CONF_DIR: conf
   INPUT_DIR: input

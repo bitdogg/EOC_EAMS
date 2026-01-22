@@ -3,7 +3,7 @@ APP:
   FUNCTION: Enterprise Architecture Management System data extraction
 
 STORAGE:
-  BACKEND: sharepoint #later local_sync
+  BACKEND: local_sync #sharepoint #later local_sync
 
   LOCAL_SYNC:
     ROOT_DIR: C:/Users/carl henry/OneDrive - Federal Aviation Administration/TMS-AFN-AIF-010-EOC - Works in Progress/EAMS
@@ -12,9 +12,7 @@ STORAGE:
     SITE_URL: https://usfaa.sharepoint.com/sites/EOC
     DOCUMENT_LIBRARY: TMS-AFN-AIF-010-EOC - Works in Progress
     BASE_FOLDER: EAMS   # optional
-    TENANT_ID: 2b69d099-dc61-447b-84c8-001733d8be3a
-    CLIENT_ID: 3beb0119-f197-4b3b-916b-2d53cd550f1e
-    CLIENT_SECRET: REMOVED_FROM_GIT_HISTORY
+
 
 PATHS:
   CONF_DIR: conf
