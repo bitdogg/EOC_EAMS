@@ -8,3 +8,7 @@
 # Python
 __pycache__/
 *.pyc
+
+# Allow only yaml/yml in conf/ that contain "Structure" in the filename
+!conf/*Structure*.yml
+!conf/*Structure*.yaml
