@@ -1,0 +1,50 @@
+APP:
+  NAME: EAMS Extraction
+  FUNCTION: Enterprise Architecture Management System data extraction
+
+STORAGE:
+  BACKEND: sharepoint #later local_sync
+
+  LOCAL_SYNC:
+    ROOT_DIR: C:/Users/carl henry/OneDrive - Federal Aviation Administration/TMS-AFN-AIF-010-EOC - Works in Progress/EAMS
+
+  SHAREPOINT:
+    SITE_URL: https://usfaa.sharepoint.com/sites/EOC
+    DOCUMENT_LIBRARY: TMS-AFN-AIF-010-EOC - Works in Progress
+    BASE_FOLDER: EAMS   # optional
+    TENANT_ID: 2b69d099-dc61-447b-84c8-001733d8be3a
+    CLIENT_ID: 3beb0119-f197-4b3b-916b-2d53cd550f1e
+    CLIENT_SECRET: REMOVED_FROM_GIT_HISTORY
+
+PATHS:
+  CONF_DIR: conf
+  INPUT_DIR: input
+  OUTPUT_DIR: output
+  SUBSET_DIR: subset
+  LOG_DIR: logs
+
+FILES:
+  EAMS_RESULT_HTML_DATA: eams_result_html_data_v1.html
+  EAMS_RESULT_JSON_DATA: eams_result_json_data_v1.html
+  EAMS_RESULT_DATA: eams_result_body.json
+  EAMS_RESULT_DATA_FINAL: eams_result_body_final_v1.txt
+  EAMS_RESULT_DATA_GROUP: eams_result_body_group.txt
+  EAMS_RESULT_DATA_GROUP1: eams_result_body_group1.txt
+  EAMS_RESULT_DATA_GROUP2: eams_result_body_group2.txt
+  EAMS_CSV_OUTPUT: eams_output.csv
+  EAMS_RUN_DATE: eams_run_history.txt
+  EAMS_SERVER_INFO: server_info
+  EAMS_CONTACT_INFO: contact_info
+
+DATA_SOURCE:
+  URL: https://denodo.faa.gov/server/v_eams_std/i_v_eams_std/views/i_veamscomprehensivesolutions_unionview?%24start_index=25&%24count=30000
+
+SUBSETS:
+    # lists for data SUBSETS
+    CONTACT_INFO: ["identifier","name","acronym","owningloborstaffoffice_0","owninglob_0","owningorganizations_0","owningserviceoffice_0","owningsuborganizations_0","businesscontacts_0","businesscontactsemail","primarybusinesscontacts_0","technicalcontacts_0","technicalcontactsemail","primarytechnicalcontacts_0","csamid","csamsystemname","csamsystemowner","systemoperationalstatus","owningdivisionbranch_0","othercontacts","othercontactsemail"]
+    SERVICE_IPS:  ["identifier","name","acronym","systemlifecyclephase_0","csamid","csamsystemname","systemoperationalstatus","ipaddress","servername"]
+    SPLUNK_SERVER_FEED:  ["identifier","name","acronym","csamid","environmentdetail","ipaddress","servername"]
+
+AUTHENTICATION:
+  USERNAME: carl.henry@faa.gov
+  SERVICE_NAME: EAMS_Denodo

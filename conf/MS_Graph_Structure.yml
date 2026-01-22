@@ -1,0 +1,15 @@
+TENANT_ID:
+CLIENT_ID:
+CLIENT_SECRET:
+
+TENANT_HOSTNAME:
+SITE_PATH:
+
+# This is the folder path INSIDE the document library root
+FOLDER_PATH:
+
+# Optional:
+OPEN_IN_BROWSER:
+
+# Yaml Path:
+# C:\Users\Carl Henry\OneDrive - Federal Aviation Administration\TMS-AFN-AIF-010-EOC - EAMS 1\conf\MS_Graph_Test.yml

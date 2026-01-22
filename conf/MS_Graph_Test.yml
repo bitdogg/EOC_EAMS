@@ -1,0 +1,15 @@
+TENANT_ID: 2b69d099-dc61-447b-84c8-001733d8be3a
+CLIENT_ID: 3beb0119-f197-4b3b-916b-2d53cd550f1e
+CLIENT_SECRET: REMOVED_FROM_GIT_HISTORY
+
+TENANT_HOSTNAME: usfaa.sharepoint.com
+SITE_PATH: /sites/msteams_fb4b8b_279574
+
+# This is the folder path INSIDE the document library root
+FOLDER_PATH: General/EAMS
+
+# Optional: If you want to auto-open a browser when running locally
+OPEN_IN_BROWSER: true
+
+# Yaml Path:
+# C:\Users\Carl Henry\OneDrive - Federal Aviation Administration\TMS-AFN-AIF-010-EOC - EAMS 1\conf\MS_Graph_Test.yml

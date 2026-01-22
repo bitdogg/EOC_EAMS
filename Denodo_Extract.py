@@ -29,16 +29,8 @@ How to run (GUI):
 YAML expectations (minimal):
 STORAGE:
   BACKEND: local_sync  # or sharepoint
-
   LOCAL_SYNC:
     ROOT_DIR: C:\\Data\\Denodo
-  # For SharePoint backend (Microsoft Graph app-only auth):
-  # SHAREPOINT:
-  #   SITE_URL: https://contoso.sharepoint.com/sites/eams
-  #   DOCUMENT_LIBRARY: Shared Documents
-  #   BASE_FOLDER: EAMS
-  #   # TENANT_ID and CLIENT_ID can be set here or via env vars.
-  #   # CLIENT_SECRET_ENV (optional) points to an env var name for the secret.
   # For SharePoint backend (Microsoft Graph app-only auth):
   # SHAREPOINT:
   #   SITE_URL: https://contoso.sharepoint.com/sites/eams
