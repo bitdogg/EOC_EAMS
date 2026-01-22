@@ -12,3 +12,5 @@ __pycache__/
 # Allow only yaml/yml in conf/ that contain "Structure" in the filename
 !conf/*Structure*.yml
 !conf/*Structure*.yaml
+conf/EAMS_Info_v3.yml
+conf/EAMS_Config_Merged.yml
