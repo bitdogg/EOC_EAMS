@@ -753,7 +753,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         output_suffix = PurePosixPath(paths_cfg["OUTPUT_DIR"]).as_posix().lstrip("/")
         subset_suffix = PurePosixPath(paths_cfg["SUBSET_DIR"]).as_posix().lstrip("/")
         remote_output_prefix = posixpath.join(base_folder, output_suffix) if base_folder else output_suffix
-        remote_subset_prefix = posixpath.join(base_folder, subset_suffix) if base_folder else subset_suffix
+        remote_subset_prefix = posixpath.join(remote_output_prefix, subset_suffix)
 
     # CLI output override
     if args.use_config_dir:

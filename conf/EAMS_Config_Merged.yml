@@ -3,7 +3,7 @@ APP:
   FUNCTION: Enterprise Architecture Management System data extraction
 
 STORAGE:
-  BACKEND: sharepoint
+  BACKEND: sharepoint # Or  local_sync
 
   LOCAL_SYNC:
     ROOT_DIR: C:/Users/carl henry/OneDrive - NIIn/TMS-AFN-AIF-010-EOC - EAMS
