@@ -41,13 +41,14 @@ DATA_SOURCE:
   URL: https://denodo.faa.gov/server/v_eams_std/i_v_eams_std/views/i_veamscomprehensivesolutions_unionview?%24start_index=25&%24count=30000
 
 SUBSETS:
+  # Removed 28 
   CONTACT_INFO:
   - identifier
   - name
   - acronym
   - owningloborstaffoffice_0
-  - owninglob_0
-  - owningorganizations_0
+  #- owninglob_0
+  #- owningorganizations_0
   - owningserviceoffice_0
   - owningsuborganizations_0
   - businesscontacts_0
@@ -56,11 +57,11 @@ SUBSETS:
   - technicalcontacts_0
   - technicalcontactsemail
   - primarytechnicalcontacts_0
-  - csamid
-  - csamsystemname
-  - csamsystemowner
+  #- csamid
+  #- csamsystemname
+  #- csamsystemowner
   - systemoperationalstatus
-  - owningdivisionbranch_0
+  #- owningdivisionbranch_0
   - othercontacts
   - othercontactsemail
 
