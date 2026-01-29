@@ -1,7 +1,7 @@
 APP:
   NAME: EAMS Extraction
   FUNCTION: Enterprise Architecture Management System data extraction
-
+  # /python.exe" u:/var/opt/EOC_EAMS/Denodo_Extract_Merged.py --config \\config U:\var\opt\EOC_EAMS\conf\EAMS_Config_Merged.yml --oytput-dir U:\var\opt\EOC_EAMS\output\ --loopback-days 10
 STORAGE:
   BACKEND: sharepoint # Or  local_sync
 
@@ -70,10 +70,23 @@ SUBSETS:
   - name
   - acronym
   - systemlifecyclephase_0
-  - csamid
-  - csamsystemname
+  #- csamid
+  #- csamsystemname
   - systemoperationalstatus
   - ipaddress
+  - servername
+
+  SERVICE_URLS:
+  - identifier
+  - name
+  - acronym
+  - systemlifecyclephase_0
+  #- csamid
+  #- csamsystemname
+  - systemoperationalstatus
+  - urlurlenvironmentcategoryurlpublicfacingonakamaitlsversionstatus_0
+  - urlnotes
+
   - servername
 
   SPLUNK_SERVER_FEED:

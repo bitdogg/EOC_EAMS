@@ -626,6 +626,28 @@ def ensure_named_file(base_name: str, default_suffix: str) -> str:
     return p.name if p.suffix else f"{p.name}{default_suffix}"
 
 
+def subset_table_name(subset_key: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", " ", subset_key).strip()
+    return "".join(part.capitalize() for part in cleaned.split()) or "Subset"
+
+
+def resolve_subset_base_name(files_cfg: Dict[str, Any], subset_key: str) -> str:
+    file_key_map = {
+        "CONTACT_INFO": "EAMS_CONTACT_INFO",
+        "SERVICE_IPS": "EAMS_SERVER_INFO",
+        "SPLUNK_SERVER_FEED": "EAMS_SPLUNK_SERVER_FEED",
+    }
+    preferred_key = file_key_map.get(subset_key)
+    if preferred_key and files_cfg.get(preferred_key):
+        return ensure_named_file(str(files_cfg[preferred_key]), ".csv")
+
+    for candidate in (f"EAMS_{subset_key}", subset_key):
+        if files_cfg.get(candidate):
+            return ensure_named_file(str(files_cfg[candidate]), ".csv")
+
+    return ensure_named_file(f"{subset_key.lower()}.csv", ".csv")
+
+
 def parse_run_date(path: Path) -> Optional[datetime]:
     if not path.exists():
         return None
@@ -875,19 +897,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     csv_path = output_dir / timestamped_name(csv_base, ts)
     xlsx_path = output_dir / timestamped_name(xlsx_base, ts)
 
-    contact_fields = subsets_cfg["CONTACT_INFO"]
-    service_fields = subsets_cfg["SERVICE_IPS"]
-    splunk_fields = subsets_cfg.get("SPLUNK_SERVER_FEED")
-
-    contact_base = ensure_named_file(files_cfg["EAMS_CONTACT_INFO"], ".csv")
-    server_base = ensure_named_file(files_cfg["EAMS_SERVER_INFO"], ".csv")
-
-    contact_csv_path = subset_dir / timestamped_name(contact_base, ts)
-    server_csv_path = subset_dir / timestamped_name(server_base, ts)
-    contact_json_path = subset_dir / timestamped_name(Path(contact_base).with_suffix(".json").name, ts)
-    server_json_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".json").name, ts)
-    contact_xlsx_path = subset_dir / timestamped_name(Path(contact_base).with_suffix(".xlsx").name, ts)
-    server_xlsx_path = subset_dir / timestamped_name(Path(server_base).with_suffix(".xlsx").name, ts)
+    subset_outputs: List[Dict[str, Any]] = []
+    for subset_key, fields in subsets_cfg.items():
+        base_name = resolve_subset_base_name(files_cfg, subset_key)
+        subset_outputs.append(
+            {
+                "key": subset_key,
+                "fields": fields,
+                "base_name": base_name,
+                "csv_path": subset_dir / timestamped_name(base_name, ts),
+                "json_path": subset_dir / timestamped_name(Path(base_name).with_suffix(".json").name, ts),
+                "xlsx_path": subset_dir / timestamped_name(Path(base_name).with_suffix(".xlsx").name, ts),
+            }
+        )
 
     changes_json_path = output_dir / timestamped_name(marker_name(json_base, "changes"), ts)
     changes_csv_path = output_dir / timestamped_name(marker_name(csv_base, "changes"), ts)
@@ -902,30 +924,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         aggregated_rows = aggregate_by_identifier(rows, key="identifier")
         logging.info("Aggregated %d source rows into %d identifier rows", len(rows), len(aggregated_rows))
 
-        contact_subset_rows = subset_rows(aggregated_rows, contact_fields)
-        service_subset_rows = subset_rows(aggregated_rows, service_fields)
-        splunk_subset_rows = subset_rows(aggregated_rows, splunk_fields) if splunk_fields else None
-
         write_json_snapshot(aggregated_rows, json_path)
         write_csv(aggregated_rows, csv_path)
         write_excel_table(aggregated_rows, xlsx_path, table_name="DenodoData")
 
-        write_json_snapshot(contact_subset_rows, contact_json_path)
-        write_csv_with_headers(aggregated_rows, contact_fields, contact_csv_path)
-        write_excel_table_with_headers(contact_subset_rows, contact_fields, contact_xlsx_path, table_name="ContactInfo")
-
-        write_json_snapshot(service_subset_rows, server_json_path)
-        write_csv_with_headers(aggregated_rows, service_fields, server_csv_path)
-        write_excel_table_with_headers(service_subset_rows, service_fields, server_xlsx_path, table_name="ServiceIps")
-
-        if splunk_subset_rows is not None:
-            splunk_base = ensure_named_file(files_cfg.get("EAMS_SPLUNK_SERVER_FEED", "splunk_server_feed.csv"), ".csv")
-            splunk_csv_path = subset_dir / timestamped_name(splunk_base, ts)
-            splunk_json_path = subset_dir / timestamped_name(Path(splunk_base).with_suffix(".json").name, ts)
-            splunk_xlsx_path = subset_dir / timestamped_name(Path(splunk_base).with_suffix(".xlsx").name, ts)
-            write_json_snapshot(splunk_subset_rows, splunk_json_path)
-            write_csv_with_headers(aggregated_rows, splunk_fields, splunk_csv_path)
-            write_excel_table_with_headers(splunk_subset_rows, splunk_fields, splunk_xlsx_path, table_name="SplunkServerFeed")
+        for subset in subset_outputs:
+            subset_rows_data = subset_rows(aggregated_rows, subset["fields"])
+            write_json_snapshot(subset_rows_data, subset["json_path"])
+            write_csv_with_headers(aggregated_rows, subset["fields"], subset["csv_path"])
+            write_excel_table_with_headers(
+                subset_rows_data,
+                subset["fields"],
+                subset["xlsx_path"],
+                table_name=subset_table_name(subset["key"]),
+            )
 
         if previous_rows:
             changes_rows = diff_rows_by_identifier(previous_rows, aggregated_rows, id_key="identifier")
@@ -952,16 +964,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     rel_path = relative_posix_path(local_file, output_dir)
                     uploads.append((local_file, posixpath.join(remote_output_prefix, rel_path)))
 
-            for local_file in [contact_csv_path, contact_json_path, contact_xlsx_path, server_csv_path, server_json_path, server_xlsx_path]:
-                if local_file.exists():
-                    rel_path = relative_posix_path(local_file, subset_dir)
-                    uploads.append((local_file, posixpath.join(remote_subset_prefix, rel_path)))
-
-            # include splunk files if created
-            if splunk_fields:
-                for p in subset_dir.glob(f"{ts}_splunk_server_feed.*"):
-                    rel_path = relative_posix_path(p, subset_dir)
-                    uploads.append((p, posixpath.join(remote_subset_prefix, rel_path)))
+            for subset in subset_outputs:
+                for local_file in (subset["csv_path"], subset["json_path"], subset["xlsx_path"]):
+                    if local_file.exists():
+                        rel_path = relative_posix_path(local_file, subset_dir)
+                        uploads.append((local_file, posixpath.join(remote_subset_prefix, rel_path)))
 
             for local_path, remote_path in uploads:
                 try:
