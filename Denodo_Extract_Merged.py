@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import posixpath
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -96,28 +97,46 @@ def relative_posix_path(path: Path, base_dir: Path) -> str:
 # ---------------------------
 
 def setup_logging(log_dir: Path, level: str = "INFO") -> None:
+    from logging.handlers import TimedRotatingFileHandler
+
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "denodo_extract.log"
 
     level_value = getattr(logging, level.upper(), logging.INFO)
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     ch = logging.StreamHandler()
     ch.setLevel(level_value)
     ch.setFormatter(fmt)
 
-    fh = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    fh = TimedRotatingFileHandler(
+        filename=str(log_path),
+        when="midnight",
+        interval=1,
+        backupCount=90,
+        encoding="utf-8",
+        utc=False,
+    )
     fh.setLevel(level_value)
     fh.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(level_value)
-    root.handlers.clear()
+
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
     root.addHandler(ch)
     root.addHandler(fh)
-
-
+    
+    
 # ---------------------------
 # Config
 # ---------------------------
@@ -731,7 +750,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--output-dir", help="Override output directory")
     parser.add_argument("--use-config-dir", action="store_true", help="Write outputs next to the YAML")
 
-    # SharePoint test options (from ms_graph_test.py)
     parser.add_argument("--sp-test", action="store_true", help="Only test SharePoint connectivity and exit")
     parser.add_argument("--open-sp", action="store_true", help="When used with --sp-test, open folder webUrl")
 
@@ -744,11 +762,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     paths_cfg = cfg["PATHS"]
     files_cfg = cfg["FILES"]
     subsets_cfg = cfg["SUBSETS"]
+
     sharepoint_client: Optional[SharePointClient] = None
     remote_output_prefix = ""
     remote_subset_prefix = ""
+    staging_root: Optional[Path] = None
+    run_succeeded = False
 
-    # Output dir resolution (local or staging)
+    # Resolve output dir
     if storage_backend == "local_sync":
         root_dir = Path(cfg["STORAGE"]["LOCAL_SYNC"]["ROOT_DIR"])
         default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
@@ -757,6 +778,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         sp_cfg = cfg["STORAGE"]["SHAREPOINT"]
         tenant_id, client_id, client_secret = load_graph_credentials(cfg)
+
         sharepoint_client = SharePointClient(
             site_url=sp_cfg["SITE_URL"],
             document_library=sp_cfg["DOCUMENT_LIBRARY"],
@@ -767,6 +789,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         staging_root = Path(tempfile.mkdtemp(prefix="denodo_extract_"))
+
         default_output_dir = Path(paths_cfg["OUTPUT_DIR"])
         if not default_output_dir.is_absolute():
             default_output_dir = staging_root / default_output_dir
@@ -777,7 +800,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         remote_output_prefix = posixpath.join(base_folder, output_suffix) if base_folder else output_suffix
         remote_subset_prefix = posixpath.join(remote_output_prefix, subset_suffix)
 
-    # CLI output override
+    # CLI overrides
     if args.use_config_dir:
         output_dir = cfg_path.parent
     elif args.output_dir:
@@ -785,7 +808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         output_dir = default_output_dir.resolve()
 
-    # log dir
+    # Resolve log dir
     log_dir_cfg = paths_cfg.get("LOG_DIR")
     if log_dir_cfg:
         log_dir = Path(log_dir_cfg)
@@ -794,30 +817,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         log_dir = output_dir / "logs"
 
-    # subset dir
+    # Resolve subset dir
     subset_dir = Path(paths_cfg["SUBSET_DIR"])
     if not subset_dir.is_absolute():
         subset_dir = output_dir / subset_dir
 
     setup_logging(log_dir, level=args.log_level)
     logging.info("Storage backend: %s", storage_backend)
+    logging.info("Output directory: %s", output_dir.as_posix())
+    logging.info("Log directory: %s", log_dir.as_posix())
+    if staging_root is not None:
+        logging.info("Using temporary SharePoint staging directory: %s", staging_root.as_posix())
 
-    # Optional SharePoint connectivity test and exit
+    # Optional SharePoint connectivity test
     if args.sp_test:
         if not sharepoint_client:
             logging.error("--sp-test requires STORAGE.BACKEND=sharepoint")
+            logging.shutdown()
             return 2
+
         base_folder = cfg["STORAGE"]["SHAREPOINT"].get("BASE_FOLDER", "").strip().strip("/")
-        # If BASE_FOLDER provided, test that folder; else test document library root
         test_path = base_folder or ""
+
         try:
             if test_path:
                 item = sharepoint_client.get_item(test_path)
             else:
-                # Root item is /root (special): use BASE_FOLDER absent -> list children
                 item = {"name": sharepoint_client.document_library, "webUrl": None}
+
             logging.info("Resolved site_id: %s", sharepoint_client.resolve_site_id())
             logging.info("Resolved drive_id: %s", sharepoint_client.resolve_drive_id())
+
             if test_path:
                 logging.info("Resolved folder: %s", test_path)
                 logging.info("webUrl: %s", item.get("webUrl"))
@@ -825,13 +855,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     webbrowser.open(item["webUrl"], new=2)
             else:
                 logging.info("BASE_FOLDER not set; SharePoint root access OK.")
+
             print("=== CONNECTED SUCCESSFULLY ===")
+            logging.shutdown()
             return 0
         except Exception as exc:
             logging.exception("SharePoint test failed: %s", exc)
+            logging.shutdown()
             return 1
 
-    # Filenames
     json_base = files_cfg["EAMS_RESULT_DATA"]
     csv_base = files_cfg["EAMS_CSV_OUTPUT"]
     run_date_cfg = files_cfg["EAMS_RUN_DATE"]
@@ -839,6 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     url = (cfg["DATA_SOURCE"].get("URL") or "").strip()
     if not url:
+        logging.shutdown()
         raise ConfigError("DATA_SOURCE.URL is empty after validation.")
 
     run_date_path = Path(run_date_cfg)
@@ -848,9 +881,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ensure_output_dirs(output_dir)
     ensure_output_dirs(subset_dir)
 
-    # If SharePoint: pull down run-date and latest prior snapshot for diff
+    # Pull down prior run metadata if SharePoint backend
     if sharepoint_client and remote_output_prefix:
-        remote_run_date_path = posixpath.join(remote_output_prefix, relative_posix_path(run_date_path, output_dir))
+        remote_run_date_path = posixpath.join(
+            remote_output_prefix,
+            relative_posix_path(run_date_path, output_dir),
+        )
         try:
             if sharepoint_client.download_file(remote_run_date_path, run_date_path):
                 logging.info("Downloaded run date from SharePoint: %s", remote_run_date_path)
@@ -870,6 +906,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     lookback_days = args.lookback_days
     modified_anchor: Optional[datetime] = None
     run_at = datetime.now()
+
     if lookback_days is not None:
         modified_anchor = run_at - timedelta(days=lookback_days)
         logging.info("Using lookback window: %s days (since %s)", lookback_days, modified_anchor.isoformat())
@@ -877,21 +914,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         modified_anchor = previous_run_at
         logging.info("Using previous run date for modified rows: %s", modified_anchor.isoformat())
 
-    # Find local prior snapshot (either already local, or downloaded from SharePoint above)
     previous_json_path = find_latest_snapshot(output_dir, json_base)
     previous_rows: List[Dict[str, Any]] = load_json_rows(previous_json_path) if previous_json_path else []
 
-    # Credentials for Denodo
     auth = cfg["AUTHENTICATION"]
     if keyring is None:
         logging.error("Missing dependency 'keyring'. Install it (pip install keyring) and ensure your secret is stored.")
+        logging.shutdown()
         return 1
+
     password = keyring.get_password(auth["SERVICE_NAME"], auth["USERNAME"])
     if not password:
         logging.error("No password found in keyring for service=%s user=%s", auth["SERVICE_NAME"], auth["USERNAME"])
+        logging.shutdown()
         return 1
 
-    # Run
     ts = run_at.strftime("%Y%m%d_%H%M%S")
     json_path = output_dir / timestamped_name(json_base, ts)
     csv_path = output_dir / timestamped_name(csv_base, ts)
@@ -931,7 +968,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for subset in subset_outputs:
             subset_rows_data = subset_rows(aggregated_rows, subset["fields"])
             write_json_snapshot(subset_rows_data, subset["json_path"])
-            write_csv_with_headers(aggregated_rows, subset["fields"], subset["csv_path"])
+            write_csv_with_headers(subset_rows_data, subset["fields"], subset["csv_path"])
             write_excel_table_with_headers(
                 subset_rows_data,
                 subset["fields"],
@@ -945,21 +982,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 change_headers = ["identifier", "field", "old", "new", "change_type"]
                 write_json_snapshot(changes_rows, changes_json_path)
                 write_csv_with_headers(changes_rows, change_headers, changes_csv_path)
-                write_excel_table_with_headers(changes_rows, change_headers, changes_xlsx_path, table_name="ChangedFields")
+                write_excel_table_with_headers(
+                    changes_rows,
+                    change_headers,
+                    changes_xlsx_path,
+                    table_name="ChangedFields",
+                )
                 logging.info("Detected %d changed fields vs previous snapshot.", len(changes_rows))
             else:
                 logging.info("No field-level changes detected vs previous snapshot.")
 
-        # NOTE: The "modified rows" feature depends on having a parseable lastmodifieddate in the source.
-        # Your prior script included a parse_last_modified() tailored to your data; if you still need this,
-        # re-add it here and write _modified outputs similarly.
-
         write_run_date(run_date_path, run_at)
 
-        # Upload to SharePoint
         if sharepoint_client and remote_output_prefix and remote_subset_prefix:
             uploads: List[Tuple[Path, str]] = []
-            for local_file in [json_path, csv_path, xlsx_path, changes_json_path, changes_csv_path, changes_xlsx_path, run_date_path]:
+            upload_failures: List[str] = []
+
+            for local_file in [
+                json_path,
+                csv_path,
+                xlsx_path,
+                changes_json_path,
+                changes_csv_path,
+                changes_xlsx_path,
+                run_date_path,
+            ]:
                 if local_file.exists():
                     rel_path = relative_posix_path(local_file, output_dir)
                     uploads.append((local_file, posixpath.join(remote_output_prefix, rel_path)))
@@ -975,15 +1022,50 @@ def main(argv: Optional[List[str]] = None) -> int:
                     sharepoint_client.upload_file(local_path, remote_path)
                     logging.info("Uploaded to SharePoint: %s", remote_path)
                 except Exception as exc:
-                    logging.error("Upload failed (%s -> %s): %s", local_path, remote_path, exc)
+                    msg = f"Upload failed ({local_path} -> {remote_path}): {exc}"
+                    upload_failures.append(msg)
+                    logging.error(msg)
+
+            if upload_failures:
+                raise RuntimeError(
+                    "One or more SharePoint uploads failed:\n" + "\n".join(upload_failures)
+                )
 
         logging.info("All done ✔")
+        run_succeeded = True
         return 0
 
     except Exception as exc:
         logging.exception("Fatal error: %s", exc)
         return 1
 
-
+    finally:
+        if staging_root is not None and staging_root.exists():
+            if run_succeeded:
+                try:
+                    logging.info(
+                        "Shutting down logging before removing temporary staging directory: %s",
+                        staging_root.as_posix(),
+                    )
+                    logging.shutdown()
+                    shutil.rmtree(staging_root)
+                    print(f"Removed temporary staging directory: {staging_root}")
+                except Exception as cleanup_exc:
+                    try:
+                        print(
+                            f"WARNING: successful run, but failed to remove temporary staging directory "
+                            f"{staging_root}: {cleanup_exc}"
+                        )
+                    except Exception:
+                        pass
+            else:
+                logging.warning(
+                    "Run failed. Preserving temporary staging directory for troubleshooting: %s",
+                    staging_root.as_posix(),
+                )
+                logging.shutdown()
+        else:
+            logging.shutdown()
+            
 if __name__ == "__main__":
     raise SystemExit(main())

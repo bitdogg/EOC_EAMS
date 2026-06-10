@@ -22,7 +22,7 @@ PATHS:
   INPUT_DIR: input
   OUTPUT_DIR: output
   SUBSET_DIR: subset
-  LOG_DIR: logs
+  LOG_DIR:  E:\var\log\EOC_EAMS
 
 FILES:
   EAMS_RESULT_HTML_DATA: eams_result_html_data_v1.html
