@@ -33,12 +33,13 @@ import webbrowser
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 from urllib.parse import urlparse
 
 import requests
 import yaml
 from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError
 from urllib3.util.retry import Retry
 
 try:
@@ -262,12 +263,30 @@ def load_graph_credentials(cfg: Dict[str, Any]) -> Tuple[str, str, str]:
     client_id = str(sp.get("CLIENT_ID") or os.getenv("GRAPH_CLIENT_ID", "")).strip()
 
     secret = ""
+    secret_source = ""
     if sp.get("CLIENT_SECRET_ENV"):
-        secret = os.getenv(str(sp.get("CLIENT_SECRET_ENV")), "").strip()
+        env_name = str(sp.get("CLIENT_SECRET_ENV"))
+        secret = os.getenv(env_name, "")
+        secret_source = f"env:{env_name}"
     if not secret and sp.get("CLIENT_SECRET"):
-        secret = str(sp.get("CLIENT_SECRET")).strip()
+        secret = str(sp.get("CLIENT_SECRET"))
+        secret_source = "config:CLIENT_SECRET"
     if not secret:
-        secret = os.getenv("GRAPH_CLIENT_SECRET", "").strip()
+        secret = os.getenv("GRAPH_CLIENT_SECRET", "")
+        secret_source = "env:GRAPH_CLIENT_SECRET"
+
+    secret = str(secret).strip()
+    # Some schedulers/storefronts persist values with wrapping quotes.
+    if len(secret) >= 2 and ((secret[0] == '"' and secret[-1] == '"') or (secret[0] == "'" and secret[-1] == "'")):
+        secret = secret[1:-1].strip()
+        logging.warning("Normalized wrapped quotes in Graph client secret from %s", secret_source)
+
+    # Common misconfiguration: secret identifier GUID copied instead of secret value.
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", secret):
+        logging.warning(
+            "Graph client secret from %s appears to be a GUID (likely secret ID, not secret VALUE).",
+            secret_source,
+        )
 
     if not tenant_id or not client_id or not secret:
         raise ConfigError(
@@ -318,12 +337,30 @@ class SharePointClient:
             "grant_type": "client_credentials",
         }
         resp = self.session.post(token_url, data=data, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except HTTPError as exc:
+            detail = ""
+            try:
+                err_payload = resp.json()
+                err = err_payload.get("error")
+                desc = err_payload.get("error_description")
+                if err or desc:
+                    detail = f" error={err!r} description={desc!r}"
+            except Exception:
+                pass
+            raise RuntimeError(
+                "Failed to acquire Microsoft Graph token. Verify TENANT_ID, CLIENT_ID, and CLIENT_SECRET/CLIENT_SECRET_ENV."
+                + detail
+            ) from exc
         payload = resp.json()
-        self._access_token = payload["access_token"]
+        token = payload.get("access_token")
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("Graph token response did not include a valid access token.")
+        self._access_token = token
         expires_in = int(payload.get("expires_in", 3600))
         self._token_expires_at = time.time() + max(expires_in - 60, 0)
-        return self._access_token
+        return token
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._token()}"}
@@ -339,8 +376,11 @@ class SharePointClient:
         url = f"{GRAPH_BASE}/sites/{parsed.netloc}:{parsed.path}"
         resp = self.session.get(url, headers=self._headers(), timeout=30)
         resp.raise_for_status()
-        self._site_id_cache = resp.json()["id"]
-        return self._site_id_cache
+        site_id = resp.json().get("id")
+        if not isinstance(site_id, str) or not site_id:
+            raise RuntimeError("Graph site response did not include a valid site id.")
+        self._site_id_cache = site_id
+        return site_id
 
     def resolve_drive_id(self) -> str:
         if self._drive_id_cache:
@@ -352,8 +392,11 @@ class SharePointClient:
         resp.raise_for_status()
         for drive in resp.json().get("value", []):
             if drive.get("name") == self.document_library:
-                self._drive_id_cache = drive["id"]
-                return self._drive_id_cache
+                drive_id = drive.get("id")
+                if not isinstance(drive_id, str) or not drive_id:
+                    raise RuntimeError("Graph drive response did not include a valid drive id.")
+                self._drive_id_cache = drive_id
+                return drive_id
         raise ConfigError(f"Document library '{self.document_library}' not found in site {self.site_url}.")
 
     def get_item(self, remote_path: str) -> Dict[str, Any]:
@@ -465,7 +508,7 @@ def create_session() -> requests.Session:
         allowed_methods=["HEAD", "GET", "OPTIONS"],
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retries)
+    adapter = HTTPAdapter(max_retries=cast(Any, retries))
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
@@ -563,6 +606,8 @@ def write_excel_table_with_headers(rows: List[Dict[str, Any]], headers: List[str
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
+    if ws is None:
+        raise RuntimeError("Failed to create active worksheet.")
     ws.title = "data"
     ws.append(headers)
     for r in rows:
@@ -829,6 +874,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     if staging_root is not None:
         logging.info("Using temporary SharePoint staging directory: %s", staging_root.as_posix())
 
+    # Startup preflight for SharePoint backend: validate token + site/drive access once.
+    if sharepoint_client is not None:
+        preflight_folder = cfg["STORAGE"]["SHAREPOINT"].get("BASE_FOLDER", "").strip().strip("/")
+        secret_env_name = str(cfg["STORAGE"]["SHAREPOINT"].get("CLIENT_SECRET_ENV") or "GRAPH_CLIENT_SECRET").strip() or "GRAPH_CLIENT_SECRET"
+        try:
+            site_id = sharepoint_client.resolve_site_id()
+            drive_id = sharepoint_client.resolve_drive_id()
+            if preflight_folder:
+                sharepoint_client.get_item(preflight_folder)
+            logging.info(
+                "SharePoint startup preflight passed (site_id=%s, drive_id=%s, folder=%s)",
+                site_id,
+                drive_id,
+                preflight_folder or "<root>",
+            )
+        except Exception as exc:
+            logging.error(
+                "SharePoint startup preflight failed: %s. Remediation: ensure env var '%s' is set for the automation job account and matches the app secret; also verify TENANT_ID/CLIENT_ID and Graph app permissions with admin consent. Fallback env vars supported: GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET.",
+                exc,
+                secret_env_name,
+            )
+            logging.shutdown()
+            return 2
+
     # Optional SharePoint connectivity test
     if args.sp_test:
         if not sharepoint_client:
@@ -893,14 +962,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:
             logging.warning("Could not download run date from SharePoint: %s", exc)
 
-        remote_snapshot_path = find_latest_remote_snapshot(sharepoint_client, remote_output_prefix, json_base)
-        if remote_snapshot_path:
-            local_snapshot_path = output_dir / Path(remote_snapshot_path).name
-            try:
-                if sharepoint_client.download_file(remote_snapshot_path, local_snapshot_path):
-                    logging.info("Downloaded prior snapshot for diff: %s", remote_snapshot_path)
-            except Exception as exc:
-                logging.warning("Could not download prior snapshot: %s", exc)
+        try:
+            remote_snapshot_path = find_latest_remote_snapshot(sharepoint_client, remote_output_prefix, json_base)
+            if remote_snapshot_path:
+                local_snapshot_path = output_dir / Path(remote_snapshot_path).name
+                try:
+                    if sharepoint_client.download_file(remote_snapshot_path, local_snapshot_path):
+                        logging.info("Downloaded prior snapshot for diff: %s", remote_snapshot_path)
+                except Exception as exc:
+                    logging.warning("Could not download prior snapshot: %s", exc)
+        except Exception as exc:
+            logging.warning("Could not resolve prior snapshot from SharePoint: %s", exc)
 
     previous_run_at = parse_run_date(run_date_path)
     lookback_days = args.lookback_days

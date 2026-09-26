@@ -9,6 +9,9 @@
 __pycache__/
 *.pyc
 
+# Virtual environments
+.venv/
+
 # Allow only yaml/yml in conf/ that contain "Structure" in the filename
 !conf/*Structure*.yml
 !conf/*Structure*.yaml
