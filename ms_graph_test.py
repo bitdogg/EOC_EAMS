@@ -16,10 +16,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import requests
 import yaml
@@ -44,15 +46,37 @@ def load_config(path: str) -> SPConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
-    missing = [k for k in ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET", "TENANT_HOSTNAME", "SITE_PATH", "FOLDER_PATH"]
-               if not raw.get(k)]
+    required = [
+        "TENANT_ID",
+        "CLIENT_ID",
+        "TENANT_HOSTNAME",
+        "SITE_PATH",
+        "FOLDER_PATH",
+    ]
+
+    missing = [k for k in required if not raw.get(k)]
     if missing:
-        raise ValueError(f"Missing required config keys: {', '.join(missing)}")
+        raise ValueError(
+            f"Missing required config keys: {', '.join(missing)}"
+        )
+
+    # Read the client secret from an environment variable.
+    # The YAML contains only the environment variable name.
+    secret_env = str(
+        raw.get("CLIENT_SECRET_ENV", "GRAPH_CLIENT_SECRET")
+    ).strip()
+
+    client_secret = os.getenv(secret_env, "").strip()
+
+    if not client_secret:
+        raise ValueError(
+            f"Client secret environment variable '{secret_env}' is not set."
+        )
 
     return SPConfig(
         tenant_id=str(raw["TENANT_ID"]).strip(),
         client_id=str(raw["CLIENT_ID"]).strip(),
-        client_secret=str(raw["CLIENT_SECRET"]).strip(),
+        client_secret=client_secret,
         tenant_hostname=str(raw["TENANT_HOSTNAME"]).strip(),
         site_path=str(raw["SITE_PATH"]).strip(),
         folder_path=str(raw["FOLDER_PATH"]).strip().lstrip("/"),
@@ -60,7 +84,7 @@ def load_config(path: str) -> SPConfig:
     )
 
 
-def get_access_token(cfg: SPConfig) -> dict:
+def get_access_token(cfg: SPConfig) -> dict[str, Any]:
     authority = f"https://login.microsoftonline.com/{cfg.tenant_id}"
     app = msal.ConfidentialClientApplication(
         client_id=cfg.client_id,
@@ -70,6 +94,8 @@ def get_access_token(cfg: SPConfig) -> dict:
 
     # For app-only Graph:
     result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    if not isinstance(result, dict):
+        raise RuntimeError("Token acquisition failed: empty or invalid response")
     if "access_token" not in result:
         raise RuntimeError(f"Token acquisition failed: {result.get('error')} - {result.get('error_description')}")
     return result
